@@ -1,0 +1,49 @@
+name: Prepare Release
+description: Select an allowed org and pin explicit source inputs or a saved job without Salesforce credentials.
+inputs:
+  config:
+    description: Repository branch policy JSON.
+    required: true
+  orgs-config:
+    description: Repository org profile JSON without credentials.
+    required: true
+  environment:
+    description: Selected GitHub environment.
+    required: true
+  selection:
+    description: full-branch, commit-range, or branch-changes; unused for saved jobs.
+  operation:
+    description: validate, deploy, quick-deploy, or reconcile.
+    default: validate
+  source-branch:
+    description: Source branch; derived from the saved record for utilities.
+  comparison-branch:
+    description: Branch Changes comparison branch.
+  start-commit:
+    description: Inclusive start commit SHA for Commit Range.
+  end-commit:
+    description: Inclusive end commit SHA for Commit Range.
+  release-record-id:
+    description: Saved validation or deployment reference, including its prefix.
+  working-directory:
+    description: Clean repository with fetched branch histories, relative to the workspace.
+    default: .
+  github-token:
+    description: Read-only repository/check/deployment token.
+    default: ${{ github.token }}
+outputs:
+  config:
+    description: Validated branch policy snapshot.
+  orgs-config:
+    description: Validated org profile snapshot.
+  profile:
+    description: Selected org profile with secret names only.
+  plan:
+    description: Pinned credential-free operation/source plan.
+  head-sha:
+    description: Selected source commit for checkout.
+  branch-sha:
+    description: Pinned source branch tip.
+runs:
+  using: node24
+  main: dist/index.js

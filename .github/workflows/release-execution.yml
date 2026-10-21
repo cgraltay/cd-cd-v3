@@ -1,0 +1,185 @@
+name: Release Execution
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      operation:
+        required: true
+        type: string
+      selection:
+        type: string
+        default: ""
+      source-branch:
+        type: string
+        default: ""
+      comparison-branch:
+        type: string
+        default: ""
+      start-commit:
+        type: string
+        default: ""
+      end-commit:
+        type: string
+        default: ""
+      release-record-id:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  checks: write
+  deployments: write
+
+jobs:
+  prepare:
+    name: Prepare Pinned Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: read
+      deployments: read
+    outputs:
+      config: ${{ steps.prepare.outputs.config }}
+      orgs-config: ${{ steps.prepare.outputs.orgs-config }}
+      profile: ${{ steps.prepare.outputs.profile }}
+      plan: ${{ steps.prepare.outputs.plan }}
+      head-sha: ${{ steps.prepare.outputs.head-sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: .ci
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select org and explicit source inputs without credentials
+        id: prepare
+        uses: ./.ci/github-actions/actions/prepare-release
+        with:
+          config: ${{ vars.SF_CICD_CONFIG }}
+          orgs-config: ${{ vars.SF_ORGS_CONFIG }}
+          environment: ${{ inputs.environment }}
+          operation: ${{ inputs.operation }}
+          selection: ${{ inputs.selection }}
+          source-branch: ${{ inputs.source-branch }}
+          comparison-branch: ${{ inputs.comparison-branch }}
+          start-commit: ${{ inputs.start-commit }}
+          end-commit: ${{ inputs.end-commit }}
+          release-record-id: ${{ inputs.release-record-id }}
+          working-directory: .ci
+
+  release:
+    name: ${{ inputs.operation }} (${{ inputs.environment }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    environment:
+      name: ${{ inputs.environment }}
+      deployment: false
+    concurrency:
+      group: salesforce-release-${{ github.repository }}-${{ fromJSON(needs.prepare.outputs.profile).org }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: .ci
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.head-sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Install Salesforce CLI
+        run: npm install --global @salesforce/cli
+      - name: Validate or Deploy Full Branch
+        id: full
+        if: inputs.selection == 'full-branch'
+        uses: ./.ci/github-actions/actions/validate-deploy-full-branch
+        with:
+          config: ${{ needs.prepare.outputs.config }}
+          orgs-config: ${{ needs.prepare.outputs.orgs-config }}
+          environment: ${{ inputs.environment }}
+          operation: ${{ inputs.operation }}
+          plan: ${{ needs.prepare.outputs.plan }}
+          working-directory: source
+          username: ${{ secrets[fromJSON(needs.prepare.outputs.profile).usernameSecret] }}
+          client-id: ${{ secrets[fromJSON(needs.prepare.outputs.profile).clientIdSecret] }}
+          jwt-private-key: ${{ secrets[fromJSON(needs.prepare.outputs.profile).jwtKeySecret] }}
+      - name: Validate or Deploy Commit Range
+        id: commits
+        if: inputs.selection == 'commit-range'
+        uses: ./.ci/github-actions/actions/validate-deploy-commit-range
+        with:
+          config: ${{ needs.prepare.outputs.config }}
+          orgs-config: ${{ needs.prepare.outputs.orgs-config }}
+          environment: ${{ inputs.environment }}
+          operation: ${{ inputs.operation }}
+          plan: ${{ needs.prepare.outputs.plan }}
+          working-directory: source
+          username: ${{ secrets[fromJSON(needs.prepare.outputs.profile).usernameSecret] }}
+          client-id: ${{ secrets[fromJSON(needs.prepare.outputs.profile).clientIdSecret] }}
+          jwt-private-key: ${{ secrets[fromJSON(needs.prepare.outputs.profile).jwtKeySecret] }}
+      - name: Validate or Deploy Branch Changes
+        id: branches
+        if: inputs.selection == 'branch-changes'
+        uses: ./.ci/github-actions/actions/validate-deploy-branch-changes
+        with:
+          config: ${{ needs.prepare.outputs.config }}
+          orgs-config: ${{ needs.prepare.outputs.orgs-config }}
+          environment: ${{ inputs.environment }}
+          operation: ${{ inputs.operation }}
+          plan: ${{ needs.prepare.outputs.plan }}
+          working-directory: source
+          username: ${{ secrets[fromJSON(needs.prepare.outputs.profile).usernameSecret] }}
+          client-id: ${{ secrets[fromJSON(needs.prepare.outputs.profile).clientIdSecret] }}
+          jwt-private-key: ${{ secrets[fromJSON(needs.prepare.outputs.profile).jwtKeySecret] }}
+      - name: Quick Deploy
+        id: quick
+        if: inputs.operation == 'quick-deploy'
+        uses: ./.ci/github-actions/actions/quick-deploy-release
+        with:
+          config: ${{ needs.prepare.outputs.config }}
+          orgs-config: ${{ needs.prepare.outputs.orgs-config }}
+          environment: ${{ inputs.environment }}
+          plan: ${{ needs.prepare.outputs.plan }}
+          working-directory: source
+          username: ${{ secrets[fromJSON(needs.prepare.outputs.profile).usernameSecret] }}
+          client-id: ${{ secrets[fromJSON(needs.prepare.outputs.profile).clientIdSecret] }}
+          jwt-private-key: ${{ secrets[fromJSON(needs.prepare.outputs.profile).jwtKeySecret] }}
+      - name: Reconcile Deployment
+        id: reconcile
+        if: inputs.operation == 'reconcile'
+        uses: ./.ci/github-actions/actions/reconcile-release
+        with:
+          config: ${{ needs.prepare.outputs.config }}
+          orgs-config: ${{ needs.prepare.outputs.orgs-config }}
+          environment: ${{ inputs.environment }}
+          plan: ${{ needs.prepare.outputs.plan }}
+          working-directory: source
+          username: ${{ secrets[fromJSON(needs.prepare.outputs.profile).usernameSecret] }}
+          client-id: ${{ secrets[fromJSON(needs.prepare.outputs.profile).clientIdSecret] }}
+          jwt-private-key: ${{ secrets[fromJSON(needs.prepare.outputs.profile).jwtKeySecret] }}
+      - name: Collect sanitized report outputs
+        id: report
+        if: always()
+        env:
+          REPORT_PATH: ${{ steps.full.outputs.report-path || steps.commits.outputs.report-path || steps.branches.outputs.report-path || steps.quick.outputs.report-path || steps.reconcile.outputs.report-path }}
+          ARTIFACT_NAME: ${{ steps.full.outputs.artifact-name || steps.commits.outputs.artifact-name || steps.branches.outputs.artifact-name || steps.quick.outputs.artifact-name || steps.reconcile.outputs.artifact-name }}
+        run: |
+          printf 'path=%s\nname=%s\n' "$REPORT_PATH" "$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+      - name: Upload sanitized release report
+        if: ${{ always() && steps.report.outputs.path != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.report.outputs.name }}
+          path: ${{ steps.report.outputs.path }}
+          if-no-files-found: ignore
+          retention-days: 10

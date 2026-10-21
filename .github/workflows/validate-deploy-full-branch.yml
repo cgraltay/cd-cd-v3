@@ -1,0 +1,35 @@
+name: Validate or Deploy Full Branch
+run-name: ${{ inputs.operation == 'deploy' && 'Deploy' || 'Validate' }} Full Branch | ${{ inputs.source-branch }} | ${{ inputs.environment }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-branch:
+        description: Branch whose complete configured source will be used
+        type: string
+        required: true
+        default: main
+      environment:
+        description: Target org environment
+        type: environment
+        required: true
+      operation:
+        description: Validate only or deploy metadata
+        type: choice
+        required: true
+        default: validate
+        options: [validate, deploy]
+
+permissions:
+  contents: read
+  checks: write
+  deployments: write
+
+jobs:
+  release:
+    uses: ./.github/workflows/release-execution.yml
+    with:
+      selection: full-branch
+      source-branch: ${{ inputs.source-branch }}
+      environment: ${{ inputs.environment }}
+      operation: ${{ inputs.operation }}

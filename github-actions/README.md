@@ -5,15 +5,18 @@ Salesforce DX project and its root npm package are not changed.
 
 ## Available Actions
 
-| Action                                                             | Purpose                                                                                                          |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| [Config reader](actions/config-reader/README.md)                   | Select branch-specific full/delta operations and plan parallel org matrices from a JSON GitHub Actions variable. |
-| [PR branch name checker](actions/pr-branch-name-checker/README.md) | Enforce regex source-branch naming rules configured per PR target branch.                                        |
-| [PR title checker](actions/pr-title-checker/README.md)             | Enforce target-specific PR title regexes, update failure comments, and delete them after correction.             |
-| [Run Code Analyzer](actions/run-code-analyzer/README.md)           | Run Salesforce Code Analyzer on changed Apex files with JSON reports, inline findings, and severity gating.      |
-| [Validate deployment](actions/validate-deployment/README.md)       | Run JWT-authenticated dry runs per org/environment with failure comments and sanitized reports.                  |
-| [Check org connection](actions/check-org-connection/README.md)     | Manually verify JWT authentication and read-only API access for one org or all configured environments.          |
-| [Deploy metadata](actions/deploy-metadata/README.md)               | Manually validate, deploy, Quick Deploy, and recover pinned releases with per-org cumulative baselines.          |
+| Action                                                                          | Purpose                                                                                                          |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| [Config reader](actions/config-reader/README.md)                                | Select branch-specific full/delta operations and plan parallel org matrices from a JSON GitHub Actions variable. |
+| [PR branch name checker](actions/pr-branch-name-checker/README.md)              | Enforce regex source-branch naming rules configured per PR target branch.                                        |
+| [PR title checker](actions/pr-title-checker/README.md)                          | Enforce target-specific PR title regexes, update failure comments, and delete them after correction.             |
+| [Run Code Analyzer](actions/run-code-analyzer/README.md)                        | Run Salesforce Code Analyzer on changed Apex files with JSON reports, inline findings, and severity gating.      |
+| [Validate deployment](actions/validate-deployment/README.md)                    | Run JWT-authenticated dry runs per org/environment with failure comments and sanitized reports.                  |
+| [Check org connection](actions/check-org-connection/README.md)                  | Manually verify JWT authentication and read-only API access for one org or all configured environments.          |
+| [Full Branch](actions/deploy-metadata/README.md)                                | Validate or deploy complete configured source at a branch tip.                                                   |
+| [Commit Range](actions/deploy-metadata/README.md#source-selection)              | Validate or deploy an inclusive commit range on a branch.                                                        |
+| [Branch Changes](actions/deploy-metadata/README.md#source-selection)            | Validate or deploy source-branch changes since a merge base.                                                     |
+| [Quick Deploy and Reconciliation](actions/deploy-metadata/README.md#operations) | Use exact saved Salesforce job context without choosing new source changes.                                      |
 
 ## Main Salesforce Workflow
 
@@ -80,23 +83,24 @@ unreviewed code against sensitive orgs. Fork restrictions remain in place.
 
 This workflow reviews open PRs only; there is no merged-PR deployment job or
 deployment-plan placeholder. Actual releases use the separate
-[Salesforce Manual Release workflow](../.github/workflows/salesforce-release.yml).
+[focused manual workflows](actions/deploy-metadata/README.md).
 Manual PR planning does not run Salesforce commands and is not proof of org connectivity or deployment.
 
 ## Manual Releases
 
-Open **Actions > Salesforce Manual Release > Run workflow**. Select the source branch
-(for example `release-x`) independently of the target environment (`production`).
-Choose **validate** for validation-only; **deploy** for an actual deployment;
-**quick-deploy** for a recorded validation; or **reconcile** to check an interrupted
-pipeline job without resubmitting. The default is validation-only.
+Choose **Validate or Deploy Full Branch**, **Validate or Deploy Commit Range**, or
+**Validate or Deploy Branch Changes** under Actions. Each has `operation: validate`
+by default, or explicit `deploy`. Full Branch needs only a source branch and target
+environment. Commit Range includes both selected commits; Branch Changes compares
+source changes since the source/comparison merge base. Inputs are pinned before
+environment approval. There is no optional target-commit field or baseline lookup.
 
-The source branch's `deployment` policy must allow the selected org. Full mode
-bootstraps an org without history; subsequent delta releases include cumulative
-changes since that org's last successful actual release. `RunRelevantTests` remains
-the default; Quick Deploy eligibility is decided by Salesforce, with no silent
-normal-deploy fallback. See the [release guide](actions/deploy-metadata/README.md)
-for branch policies, saved record IDs, concurrency, recovery, and limitations.
+**Quick Deploy** and **Reconcile Deployment** take an environment and a saved
+`validation:123` or `deployment:456` reference, deriving the original source context.
+The source branch's deployment policy still must allow the org. Deployment history
+is audit-only; validation uses check records rather than deployment records.
+`RunRelevantTests` remains the default and Quick Deploy never silently falls back
+to a normal deploy. See the [release guide](actions/deploy-metadata/README.md).
 
 ## Manual Org Connection Checks
 
@@ -107,7 +111,7 @@ org profile key, or leave it empty to check all configured orgs in parallel.
 
 The workflow uses `SF_ORGS_CONFIG` and environment Secrets, not `SF_CICD_CONFIG`.
 Its preparation job needs no credentials; checking jobs verify JWT login and a
-read-only API query, publish sanitized summaries, and clean up local auth state.
+read-only REST resources request, publish sanitized summaries, and clean up local auth state.
 No metadata is deployed and no PR checks are started. See the
 [connection action guide](actions/check-org-connection/README.md) for setup and
 security requirements. Do not run unreviewed action code with production secrets.
@@ -259,8 +263,8 @@ than `require`. The bundler produces executable CommonJS output. TypeScript
 development scripts also use imports, with `tsx` handling local execution.
 The validation action uses JWT and an already installed Salesforce CLI. Its
 [org profiles and setup](actions/config-reader/ORG_CONNECTIONS.md) separate public connection metadata
-from GitHub environment secrets. Actual metadata deployment execution remains
-future work. The config reader itself never connects to an org.
+from GitHub environment secrets. Manual validation and deployment use the focused
+release workflows and shared engine. The config reader itself never connects to an org.
 
 ## Usage Once Published
 

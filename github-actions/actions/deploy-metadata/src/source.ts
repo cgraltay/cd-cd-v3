@@ -36,12 +36,79 @@ export function assertAncestor(
   ]);
 }
 
+export type SourceSelection = 'full-branch' | 'commit-range' | 'branch-changes';
+export interface SourceRange {
+  selection: SourceSelection;
+  branchSha: string;
+  headSha: string;
+  baseSha?: string;
+  startSha?: string;
+  comparisonSha?: string;
+}
+
+export function selectSourceRange(
+  workspace: string,
+  selection: SourceSelection,
+  branchSha: string,
+  options: { startSha?: string; endSha?: string; comparisonSha?: string } = {}
+): SourceRange {
+  shaSchema.parse(branchSha);
+  if (selection === 'full-branch') {
+    if (options.startSha || options.endSha || options.comparisonSha) {
+      throw new Error(
+        'Full Branch takes only a source branch, not commit or comparison inputs.'
+      );
+    }
+    return { selection, branchSha, headSha: branchSha };
+  }
+  if (selection === 'commit-range') {
+    if (!options.startSha || !options.endSha || options.comparisonSha) {
+      throw new Error(
+        'Commit Range requires start and end commits on the selected branch.'
+      );
+    }
+    const startSha = shaSchema.parse(options.startSha);
+    const headSha = shaSchema.parse(options.endSha);
+    assertAncestor(workspace, startSha, headSha);
+    assertAncestor(workspace, headSha, branchSha);
+    const parents = git(workspace, [
+      'rev-list',
+      '--parents',
+      '-n',
+      '1',
+      startSha
+    ])
+      .trim()
+      .split(' ');
+    return { selection, branchSha, headSha, startSha, baseSha: parents[1] };
+  }
+  if (!options.comparisonSha || options.startSha || options.endSha) {
+    throw new Error(
+      'Branch Changes requires a comparison branch, not commit inputs.'
+    );
+  }
+  const comparisonSha = shaSchema.parse(options.comparisonSha);
+  const baseSha = git(workspace, [
+    'merge-base',
+    branchSha,
+    comparisonSha
+  ]).trim();
+  return {
+    selection,
+    branchSha,
+    headSha: branchSha,
+    comparisonSha,
+    baseSha: shaSchema.parse(baseSha)
+  };
+}
+
 export function releaseSources(
   workspace: string,
   headSha: string,
   branchSha: string,
   settings: ValidationSettings,
-  baseSha?: string
+  baseSha?: string,
+  emptyBase = false
 ): { sources: string[]; payloadHash: string } {
   shaSchema.parse(headSha);
   shaSchema.parse(branchSha);
@@ -57,9 +124,9 @@ export function releaseSources(
   }
   assertAncestor(workspace, headSha, branchSha);
   if (baseSha) assertAncestor(workspace, baseSha, headSha);
-  if (!baseSha && settings.mode === 'delta') {
+  if (!baseSha && settings.mode === 'delta' && !emptyBase) {
     throw new Error(
-      'No successful actual deployment baseline exists. Bootstrap this org with a full deployment.'
+      'Delta selection requires an explicit comparison base or a range starting at the root commit.'
     );
   }
   const project = JSON.parse(
@@ -74,6 +141,19 @@ export function releaseSources(
         filename.startsWith(directory + '/')
     );
   const changes: { filename: string; status: string }[] = [];
+  if (emptyBase) {
+    for (const filename of git(workspace, [
+      'ls-tree',
+      '-r',
+      '--name-only',
+      '-z',
+      headSha
+    ])
+      .split('\0')
+      .filter(Boolean)) {
+      changes.push({ filename, status: 'added' });
+    }
+  }
   if (baseSha) {
     const fields = git(workspace, [
       'diff',

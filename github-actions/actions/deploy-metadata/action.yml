@@ -1,5 +1,5 @@
-name: Deploy Salesforce Metadata
-description: Manually validate, deploy, quick deploy, or reconcile pinned Salesforce releases with per-org cumulative baselines.
+name: Release Engine
+description: Shared explicit-source release runner; use the focused validate/deploy actions for manual workflows.
 branding:
   icon: upload-cloud
   color: green
@@ -11,31 +11,31 @@ inputs:
     description: Credential-free org profile JSON snapshot from SF_ORGS_CONFIG.
     required: true
   source-branch:
-    description: Source branch to deploy, independent of the selected environment and workflow code branch.
-    required: true
+    description: Source branch for credential-free preparation; utilities derive it from their saved reference.
   environment:
     description: Selected GitHub environment, mapped to exactly one allowed org.
     required: true
   operation:
     description: validate, deploy, quick-deploy, or reconcile a previously recorded pipeline job.
     default: validate
-  mode:
-    description: configured, full, or delta; Quick Deploy uses the saved validation mode.
-    default: configured
-  to-sha:
-    description: Optional full commit SHA on the selected source branch; otherwise pin its current tip.
+  selection:
+    description: full-branch, commit-range, or branch-changes for preparation.
+  start-commit:
+    description: Inclusive first full commit SHA for Commit Range.
+  end-commit:
+    description: Inclusive last full commit SHA for Commit Range.
+  comparison-branch:
+    description: Comparison branch for Branch Changes.
+  plan:
+    description: Immutable prepared operation/source plan for execution.
   release-record-id:
-    description: GitHub release deployment record ID for Quick Deploy or report-only reconciliation, not the Salesforce job ID.
+    description: Prefixed saved reference such as validation:123 or deployment:456.
   prepare-only:
     description: Resolve policy and pin the source commit without Salesforce credentials.
     default: 'false'
   github-token:
-    description: Token with contents read and deployments read/write for execution.
+    description: Token with contents read, checks write, and deployments write for execution.
     default: ${{ github.token }}
-  head-sha:
-    description: Immutable selected source commit from preparation.
-  branch-sha:
-    description: Immutable source branch tip from preparation, used to verify ancestry.
   working-directory:
     description: Clean source checkout containing sfdx-project.json, relative to GITHUB_WORKSPACE.
     default: .
@@ -46,6 +46,8 @@ inputs:
   jwt-private-key:
     description: Full unencrypted RSA PEM private key from the selected environment secret.
 outputs:
+  plan:
+    description: Pinned credential-free operation/source plan.
   config:
     description: Branch policy snapshot for execution.
   orgs-config:
@@ -57,9 +59,9 @@ outputs:
   branch-sha:
     description: Pinned source branch tip.
   outcome:
-    description: Succeeded, Failed, or Skipped; validation success never advances actual deployment history.
+    description: Succeeded, Failed, or Skipped; history is audit-only.
   release-record-id:
-    description: GitHub deployment record ID; use this for subsequent Quick Deploy or reconciliation.
+    description: Saved validation or deployment reference for Quick Deploy or reconciliation.
   deployment-id:
     description: Salesforce validation or actual deployment job ID.
   report-path:

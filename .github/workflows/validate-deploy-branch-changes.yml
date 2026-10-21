@@ -1,0 +1,40 @@
+name: Validate or Deploy Branch Changes
+run-name: ${{ inputs.operation == 'deploy' && 'Deploy' || 'Validate' }} Branch Changes | ${{ inputs.source-branch }} to ${{ inputs.comparison-branch }} | ${{ inputs.environment }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-branch:
+        description: Branch containing the source changes, such as release/x
+        type: string
+        required: true
+      comparison-branch:
+        description: Branch used to find the common ancestor, such as main
+        type: string
+        required: true
+        default: main
+      environment:
+        description: Target org environment
+        type: environment
+        required: true
+      operation:
+        description: Validate only or deploy metadata
+        type: choice
+        required: true
+        default: validate
+        options: [validate, deploy]
+
+permissions:
+  contents: read
+  checks: write
+  deployments: write
+
+jobs:
+  release:
+    uses: ./.github/workflows/release-execution.yml
+    with:
+      selection: branch-changes
+      source-branch: ${{ inputs.source-branch }}
+      comparison-branch: ${{ inputs.comparison-branch }}
+      environment: ${{ inputs.environment }}
+      operation: ${{ inputs.operation }}

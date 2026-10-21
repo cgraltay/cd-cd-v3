@@ -1,0 +1,27 @@
+name: Reconcile Deployment
+run-name: Reconcile Deployment | ${{ inputs.environment }} | ${{ inputs.release-record-id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target org environment
+        type: environment
+        required: true
+      release-record-id:
+        description: Saved validation:123 or deployment:456 reference to report
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  checks: write
+  deployments: write
+
+jobs:
+  release:
+    uses: ./.github/workflows/release-execution.yml
+    with:
+      operation: reconcile
+      environment: ${{ inputs.environment }}
+      release-record-id: ${{ inputs.release-record-id }}

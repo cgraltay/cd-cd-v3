@@ -1,0 +1,44 @@
+name: Validate or Deploy Branch Changes
+description: Validate or deploy a source branch's metadata changes since its merge base with a comparison branch.
+inputs:
+  config:
+    description: Prepared branch policy snapshot.
+    required: true
+  orgs-config:
+    description: Prepared org profile snapshot.
+    required: true
+  environment:
+    description: Selected GitHub environment.
+    required: true
+  plan:
+    description: Immutable output from Prepare Release.
+    required: true
+  operation:
+    description: validate or deploy.
+    default: validate
+  working-directory:
+    description: Clean source checkout relative to the workspace.
+    default: .
+  username:
+    description: Integration username secret.
+  client-id:
+    description: OAuth client ID secret.
+  jwt-private-key:
+    description: Full multiline RSA PEM secret.
+  github-token:
+    description: Token for check-run validation records and deployment audit records.
+    default: ${{ github.token }}
+outputs:
+  outcome:
+    description: Succeeded, Failed, or Skipped.
+  release-record-id:
+    description: Saved reference such as validation:123 or deployment:456.
+  deployment-id:
+    description: Salesforce job ID.
+  report-path:
+    description: Sanitized JSON report path.
+  artifact-name:
+    description: Safe artifact name.
+runs:
+  using: node24
+  main: dist/index.js

@@ -9,8 +9,6 @@ import {
   redactReport
 } from '../../validate-deployment/src/validation';
 import {
-  assertSettled,
-  baseline,
   jobIdSchema,
   savedValidation,
   type ReleaseEntry,
@@ -18,7 +16,12 @@ import {
   type Receipt
 } from './history';
 import type { ReleaseOperation, releasePlan } from './plan';
-import { assertAncestor, releaseSources } from './source';
+import {
+  assertAncestor,
+  releaseSources,
+  selectSourceRange,
+  type SourceRange
+} from './source';
 import { verifyOrgApi } from '../../../shared/org-api';
 
 export interface ReleaseOptions extends JwtOptions {
@@ -27,7 +30,10 @@ export interface ReleaseOptions extends JwtOptions {
   history: ReleaseHistory;
   headSha: string;
   branchSha: string;
+  range?: SourceRange;
   recordId?: number;
+  recordKind?: 'validation' | 'deployment';
+  onAuditWarning?: (message: string) => void;
   onRecord?: (entry: ReleaseEntry) => void;
   onReport?: (report: unknown) => void;
 }
@@ -87,9 +93,37 @@ export async function runRelease(options: ReleaseOptions): Promise<{
 }> {
   return withJwtOrg(options, async ({ alias, run }) => {
     const { orgId } = await verifyOrgApi({ alias, run });
-    const entries = await options.history.list();
-    const current = baseline(entries, orgId);
     const plan = options.plan;
+    const auditStatus = async (
+      entry: ReleaseEntry,
+      state: 'in_progress' | 'success' | 'failure'
+    ) => {
+      if (!entry.id) return;
+      try {
+        await options.history.status(entry, state);
+      } catch {
+        options.onAuditWarning?.(
+          'Unable to update the audit record. Salesforce outcome and submitted job ID remain authoritative.'
+        );
+      }
+    };
+    const selectedRecord = async (kind: 'validation' | 'deployment') => {
+      if (!options.recordId)
+        throw new Error('A saved validation/deployment reference is required.');
+      const entry = await options.history.get(options.recordId, kind);
+      if (
+        entry.receipt.orgId !== orgId ||
+        entry.receipt.org !== plan.org ||
+        entry.receipt.environment !== plan.environment ||
+        entry.receipt.branch !== plan.branch ||
+        entry.receipt.headSha !== options.headSha
+      ) {
+        throw new Error(
+          'Saved release identity does not match the authenticated org, environment, branch, and commit.'
+        );
+      }
+      return entry;
+    };
     const readReport = async (entry: ReleaseEntry) => {
       if (!entry.jobId)
         throw new Error(
@@ -124,11 +158,11 @@ export async function runRelease(options: ReleaseOptions): Promise<{
       options.onRecord?.(entry);
       const result = await readReport(entry);
       if (result.succeeded) {
-        await options.history.status(entry, 'success');
+        await auditStatus(entry, 'success');
         return { outcome: 'Succeeded' as const, entry };
       }
       if (result.failed) {
-        await options.history.status(entry, 'failure');
+        await auditStatus(entry, 'failure');
         throw new Error(
           'Salesforce deployment/validation failed or was canceled. See the sanitized report.'
         );
@@ -139,41 +173,15 @@ export async function runRelease(options: ReleaseOptions): Promise<{
     };
 
     if (options.operation === 'reconcile') {
-      const entry = entries.find(
-        (candidate) => candidate.id === options.recordId
-      );
-      if (
-        !entry ||
-        entry.receipt.branch !== plan.branch ||
-        entry.receipt.environment !== plan.environment ||
-        entry.receipt.headSha !== options.headSha
-      ) {
-        throw new Error(
-          'Reconciliation requires an existing release record for this branch and pinned commit.'
-        );
-      }
-      assertSettled(entries, entry.id);
-      if (
-        entry.receipt.operation !== 'validate' &&
-        entry.id !== current?.id &&
-        entry.receipt.baselineId !== (current?.id ?? null)
-      ) {
-        throw new Error(
-          'A later deployment changed the baseline. This older record cannot advance it.'
-        );
-      }
+      const entry = await selectedRecord(options.recordKind ?? 'deployment');
       return finish(entry);
     }
 
-    assertSettled(entries);
     let receipt: Receipt;
     let args: string[];
     if (options.operation === 'quick-deploy') {
-      const validation = savedValidation(
-        entries,
-        options.recordId ?? 0,
-        current
-      );
+      const selected = await selectedRecord('validation');
+      const validation = savedValidation([selected], selected.id);
       if (
         validation.receipt.branch !== plan.branch ||
         validation.receipt.environment !== plan.environment ||
@@ -189,12 +197,6 @@ export async function runRelease(options: ReleaseOptions): Promise<{
         );
       }
       assertAncestor(options.workspace, options.headSha, options.branchSha);
-      if (current)
-        assertAncestor(
-          options.workspace,
-          current.receipt.headSha,
-          options.headSha
-        );
       if (!(await readReport(validation)).succeeded)
         throw new Error(
           'The recorded validation is no longer confirmed successful.'
@@ -216,14 +218,29 @@ export async function runRelease(options: ReleaseOptions): Promise<{
         '--json'
       ];
     } else {
+      const requested =
+        options.range ??
+        selectSourceRange(options.workspace, 'full-branch', options.branchSha);
+      const range = selectSourceRange(
+        options.workspace,
+        requested.selection,
+        options.branchSha,
+        {
+          startSha: requested.startSha,
+          endSha:
+            requested.selection === 'commit-range'
+              ? requested.headSha
+              : undefined,
+          comparisonSha: requested.comparisonSha
+        }
+      );
       if (
-        current &&
-        plan.settings.mode === 'delta' &&
-        JSON.stringify(plan.settings.sourceDirs) !==
-          JSON.stringify(current.receipt.settings.sourceDirs)
+        range.headSha !== options.headSha ||
+        plan.settings.mode !==
+          (range.selection === 'full-branch' ? 'full' : 'delta')
       ) {
         throw new Error(
-          'Configured source directories changed since the baseline. Select full mode.'
+          'Pinned source selection does not match the release payload mode and commit.'
         );
       }
       const payload = releaseSources(
@@ -231,7 +248,8 @@ export async function runRelease(options: ReleaseOptions): Promise<{
         options.headSha,
         options.branchSha,
         plan.settings,
-        current?.receipt.headSha
+        range.baseSha,
+        range.selection === 'commit-range' && !range.baseSha
       );
       if (!payload.sources.length) return { outcome: 'Skipped' };
       receipt = {
@@ -241,9 +259,7 @@ export async function runRelease(options: ReleaseOptions): Promise<{
         orgId,
         environment: plan.environment,
         branch: plan.branch,
-        headSha: options.headSha,
-        baseSha: current?.receipt.headSha,
-        baselineId: current?.id ?? null,
+        ...range,
         operation: options.operation,
         settings: plan.settings,
         payloadHash: payload.payloadHash
@@ -255,9 +271,22 @@ export async function runRelease(options: ReleaseOptions): Promise<{
       args.push('--async');
     }
 
-    const entry = await options.history.create(receipt);
+    let entry: ReleaseEntry;
+    try {
+      entry = await options.history.create(receipt);
+    } catch {
+      options.onAuditWarning?.(
+        'Unable to create the audit record. Continuing with the explicitly selected payload; preserve the Salesforce job ID/report for recovery.'
+      );
+      entry = {
+        id: 0,
+        kind: receipt.operation === 'validate' ? 'validation' : 'deployment',
+        receipt,
+        state: 'in_progress'
+      };
+    }
     options.onRecord?.(entry);
-    await options.history.status(entry, 'in_progress');
+    await auditStatus(entry, 'in_progress');
     const response = await run(args);
     const submitted = json(response);
     options.onReport?.(
@@ -273,7 +302,7 @@ export async function runRelease(options: ReleaseOptions): Promise<{
         submitted.name === 'NothingToDeploy' ||
         submitted.code === 'NothingToDeploy'
       ) {
-        await options.history.status(entry, 'failure');
+        await auditStatus(entry, 'failure');
         return { outcome: 'Skipped', entry };
       }
       if (
@@ -282,7 +311,7 @@ export async function runRelease(options: ReleaseOptions): Promise<{
           String(submitted.name)
         )
       ) {
-        await options.history.status(entry, 'failure');
+        await auditStatus(entry, 'failure');
         throw new Error(
           'Salesforce rejected the request. Quick Deploy eligibility is not guaranteed; choose a normal Deploy explicitly if appropriate.'
         );
@@ -292,7 +321,7 @@ export async function runRelease(options: ReleaseOptions): Promise<{
       );
     }
     entry.jobId = result.data.id;
-    await options.history.status(entry, 'in_progress');
+    await auditStatus(entry, 'in_progress');
     return finish(entry);
   });
 }

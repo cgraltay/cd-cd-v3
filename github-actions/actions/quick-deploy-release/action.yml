@@ -1,0 +1,41 @@
+name: Quick Deploy
+description: Quick deploy the exact server-side payload of a saved successful validation.
+inputs:
+  config:
+    description: Prepared branch policy snapshot.
+    required: true
+  orgs-config:
+    description: Prepared org profile snapshot.
+    required: true
+  environment:
+    description: Selected GitHub environment.
+    required: true
+  plan:
+    description: Prepared plan derived from a saved validation reference.
+    required: true
+  working-directory:
+    description: Pinned source checkout relative to the workspace.
+    default: .
+  username:
+    description: Integration username secret.
+  client-id:
+    description: OAuth client ID secret.
+  jwt-private-key:
+    description: Full multiline RSA PEM secret.
+  github-token:
+    description: Token for validation lookup and deployment audit records.
+    default: ${{ github.token }}
+outputs:
+  outcome:
+    description: Succeeded or Failed.
+  release-record-id:
+    description: Saved deployment reference.
+  deployment-id:
+    description: Actual Salesforce Quick Deploy job ID.
+  report-path:
+    description: Sanitized JSON report path.
+  artifact-name:
+    description: Safe artifact name.
+runs:
+  using: node24
+  main: dist/index.js
