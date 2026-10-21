@@ -1,0 +1,31 @@
+name: Run Salesforce Code Analyzer
+description: Analyze changed Apex files and synchronize Salesforce Code Analyzer PR feedback.
+branding:
+  icon: search
+  color: blue
+inputs:
+  config:
+    description: JSON branch configuration, typically vars.SF_CICD_CONFIG.
+    required: true
+  github-token:
+    description: GitHub token for PR files and feedback; requires pull-requests write for comments.
+    default: ${{ github.token }}
+  working-directory:
+    description: Checkout containing the PR source and analyzer config.
+    default: .
+outputs:
+  skipped:
+    description: Whether analysis was disabled or there were no changed Apex targets.
+  files-analyzed:
+    description: Number of changed Apex files analyzed.
+  violations:
+    description: Total violations in the JSON report.
+  blocking-violations:
+    description: Violations meeting the configured failure severity threshold.
+  inline-comments:
+    description: Number of inline comments successfully created.
+  report-path:
+    description: Absolute JSON report path for artifact upload; empty when skipped.
+runs:
+  using: node24
+  main: dist/index.js

@@ -1,0 +1,38 @@
+name: Salesforce CI/CD Config Reader
+description: Read JSON config, select a branch rule, and plan per-org CI/CD matrices.
+branding:
+  icon: settings
+  color: blue
+inputs:
+  config:
+    description: A JSON object, typically passed from vars.SF_CICD_CONFIG.
+    required: true
+  orgs-config:
+    description: Credential-free org profile JSON, typically vars.SF_ORGS_CONFIG; takes precedence over orgs-config-path.
+  orgs-config-path:
+    description: Optional credential-free org profile JSON file; enriches matrix rows with environments and secret names.
+  branch:
+    description: Branch to match; defaults to the PR target branch or current ref name.
+    default: ${{ github.base_ref || github.ref_name }}
+outputs:
+  config:
+    description: The validated configuration object serialized as compact JSON.
+  orgs-config:
+    description: Validated credential-free org profiles as compact JSON for downstream jobs, or an empty string if not supplied.
+  branch:
+    description: The branch name used for rule selection.
+  matched-branch:
+    description: The matching branch name or glob pattern, or an empty string if none matched.
+  branch-config:
+    description: The selected branch settings with operation defaults applied, as JSON.
+  validation-enabled:
+    description: Whether validation has enabled org targets, as a true or false string.
+  deployment-enabled:
+    description: Whether a closed merged PR has enabled deployment targets, as a true or false string.
+  validation-matrix:
+    description: A GitHub matrix include object with one entry per validation org.
+  deployment-matrix:
+    description: A matrix include object per deployment org, pinned to the merged PR commit range.
+runs:
+  using: node24
+  main: dist/index.js

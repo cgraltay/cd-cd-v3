@@ -1,0 +1,34 @@
+name: PR Branch Name Checker
+description: Check a PR source branch against regex naming rules for its target branch.
+branding:
+  icon: git-pull-request
+  color: green
+inputs:
+  config:
+    description: JSON branch configuration, typically vars.SF_CICD_CONFIG.
+    required: true
+  github-token:
+    description: GitHub token with pull-requests write permission for rejected-name feedback comments.
+    default: ${{ github.token }}
+  source-branch:
+    description: The PR source branch name.
+    default: ${{ github.head_ref }}
+  target-branch:
+    description: The PR target branch used to select naming rules.
+    default: ${{ github.base_ref }}
+outputs:
+  checked:
+    description: Whether an enabled naming policy was evaluated, as true or false.
+  valid:
+    description: Whether the name was accepted or the naming policy was disabled.
+  source-branch:
+    description: The evaluated PR source branch.
+  target-branch:
+    description: The evaluated PR target branch.
+  matched-branch:
+    description: The exact target rule or glob pattern selected from configuration.
+  matched-pattern:
+    description: The accepted source regular expression, or an empty string if none matched.
+runs:
+  using: node24
+  main: dist/index.js

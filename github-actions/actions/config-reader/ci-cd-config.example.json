@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "branches": {
+    "develop": {
+      "branchName": {
+        "enabled": true,
+        "allowedSourcePatterns": [
+          "^feature/ASOS-[0-9]+$",
+          "^bugfix/ASOS-[0-9]+$",
+          "^hotfix/ASOS-[0-9]+$"
+        ]
+      },
+      "prTitle": {
+        "enabled": true,
+        "allowedPatterns": ["^ASOS-[0-9]+: .+$"]
+      },
+      "codeAnalyzer": {
+        "enabled": true,
+        "packageDirectories": ["force-app"],
+        "configPath": "code-analyzer.yml",
+        "ruleSelectors": ["Recommended"],
+        "failOnSeverity": 5,
+        "maxInlineComments": 50
+      },
+      "validation": {
+        "enabled": true,
+        "mode": "delta",
+        "orgs": ["development", "qa"],
+        "testLevel": "RunRelevantTests",
+        "waitMinutes": 180
+      },
+      "deployment": {
+        "enabled": true,
+        "mode": "delta",
+        "orgs": ["development"]
+      }
+    },
+    "qa": {
+      "validation": {
+        "enabled": true,
+        "mode": "full",
+        "orgs": ["qa"],
+        "testLevel": "RunRelevantTests",
+        "waitMinutes": 180
+      },
+      "deployment": {
+        "enabled": true,
+        "mode": "delta",
+        "orgs": ["qa"]
+      }
+    },
+    "uat": {
+      "validation": {
+        "enabled": true,
+        "mode": "full",
+        "orgs": ["uat"],
+        "testLevel": "RunRelevantTests",
+        "waitMinutes": 180
+      },
+      "deployment": {
+        "enabled": true,
+        "mode": "delta",
+        "orgs": ["uat"]
+      }
+    },
+    "main": {
+      "validation": {
+        "enabled": true,
+        "mode": "full",
+        "orgs": ["production"],
+        "testLevel": "RunRelevantTests",
+        "waitMinutes": 180
+      },
+      "deployment": {
+        "enabled": true,
+        "mode": "delta",
+        "orgs": ["production"]
+      }
+    }
+  }
+}

@@ -1,0 +1,263 @@
+name: Salesforce PR Review
+run-name: Salesforce PR Review | ${{ github.event.pull_request.number || 'plan' }} | ${{ github.base_ref || inputs.target-branch || github.ref_name }}
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      target-branch:
+        description: Branch policy to inspect (plan only; no Salesforce commands)
+        type: string
+        default: develop
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: salesforce-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  configuration:
+    name: Configuration and Org Plan
+    runs-on: ubuntu-latest
+    outputs:
+      config: ${{ steps.config.outputs.config }}
+      orgs-config: ${{ steps.config.outputs.orgs-config }}
+      branch: ${{ steps.config.outputs.branch }}
+      matched-branch: ${{ steps.config.outputs.matched-branch }}
+      branch-config: ${{ steps.config.outputs.branch-config }}
+      validation-enabled: ${{ steps.config.outputs.validation-enabled }}
+      validation-matrix: ${{ steps.config.outputs.validation-matrix }}
+      analyzer-enabled: ${{ steps.plan.outputs.analyzer-enabled }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: .ci
+          persist-credentials: false
+      - name: Read branch policy and org profiles
+        id: config
+        uses: ./.ci/github-actions/actions/config-reader
+        with:
+          config: ${{ vars.SF_CICD_CONFIG }}
+          branch: ${{ github.base_ref || inputs.target-branch || github.ref_name }}
+          orgs-config: ${{ vars.SF_ORGS_CONFIG }}
+      - name: Publish configuration plan
+        id: plan
+        env:
+          BRANCH: ${{ steps.config.outputs.branch }}
+          MATCHED_BRANCH: ${{ steps.config.outputs.matched-branch }}
+          BRANCH_CONFIG: ${{ steps.config.outputs.branch-config }}
+          VALIDATION_MATRIX: ${{ steps.config.outputs.validation-matrix }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const policy = JSON.parse(process.env.BRANCH_CONFIG);
+          const validation = JSON.parse(process.env.VALIDATION_MATRIX).include;
+          if (validation.some((row) => !row.environment || !row.usernameSecret || !row.clientIdSecret || !row.jwtKeySecret)) {
+            throw new Error('Set SF_ORGS_CONFIG to valid credential-free org profiles before planning org validation.');
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `analyzer-enabled=${policy.codeAnalyzer?.enabled === true}\n`);
+          const code = (value) => '`' + String(value).replaceAll('`', '').replaceAll('|', '\\|').replace(/[\r\n]/g, ' ') + '`';
+          const lines = [
+            '## Salesforce configuration plan', '',
+            `Branch: ${code(process.env.BRANCH)}`, '',
+            `Matched rule: ${code(process.env.MATCHED_BRANCH || '(none)')}`, '',
+            `Code Analyzer enabled: ${policy.codeAnalyzer?.enabled === true}`, '',
+            '| Operation | Org | Environment | Mode |',
+            '| --- | --- | --- | --- |',
+            ...validation.map((row) => `| Validation | ${code(row.org)} | ${code(row.environment)} | ${code(row.mode)} |`),
+            '',
+            process.env.EVENT_NAME === 'workflow_dispatch'
+              ? 'Manual observation run: PR checks and Salesforce commands are not executed.'
+              : 'PR validation is a dry run; no metadata is deployed.'
+          ];
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
+          if (!process.env.MATCHED_BRANCH) throw new Error('No branch rule matches the requested target.');
+          NODE
+
+  branch-name:
+    name: PR Branch Name
+    needs: configuration
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: .ci
+          persist-credentials: false
+      - uses: ./.ci/github-actions/actions/pr-branch-name-checker
+        with:
+          config: ${{ needs.configuration.outputs.config }}
+
+  title:
+    name: PR Title
+    needs: configuration
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: .ci
+          persist-credentials: false
+      - uses: ./.ci/github-actions/actions/pr-title-checker
+        with:
+          config: ${{ needs.configuration.outputs.config }}
+
+  code-analyzer:
+    name: Salesforce Code Analyzer
+    needs: [configuration, branch-name, title]
+    if: >-
+      github.event_name == 'pull_request' && github.event.action != 'closed' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.branch-name.result == 'success' && needs.title.result == 'success' &&
+      needs.configuration.outputs.analyzer-enabled == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: .ci
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Install Salesforce analysis tooling
+        run: |
+          npm install --global @salesforce/cli
+          sf plugins install code-analyzer
+      - name: Analyze changed Apex files
+        id: analyzer
+        uses: ./.ci/github-actions/actions/run-code-analyzer
+        with:
+          config: ${{ needs.configuration.outputs.config }}
+          working-directory: source
+      - name: Upload analyzer report
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.analyzer.outputs.report-path != '' }}
+        with:
+          name: salesforce-code-analyzer
+          path: ${{ steps.analyzer.outputs.report-path }}
+          retention-days: 10
+
+  validation:
+    name: Validate ${{ matrix.org }} (${{ matrix.mode }})
+    needs: [configuration, branch-name, title, code-analyzer]
+    if: >-
+      !cancelled() && github.event_name == 'pull_request' && github.event.action != 'closed' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.configuration.result == 'success' &&
+      needs.branch-name.result == 'success' && needs.title.result == 'success' &&
+      (needs.code-analyzer.result == 'success' ||
+        (needs.configuration.outputs.analyzer-enabled != 'true' && needs.code-analyzer.result == 'skipped')) &&
+      needs.configuration.outputs.validation-enabled == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      pull-requests: write
+    environment: ${{ matrix.environment }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.configuration.outputs.validation-matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: .ci
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Install Salesforce CLI
+        run: npm install --global @salesforce/cli
+      - name: Validate metadata without deploying
+        id: validation
+        uses: ./.ci/github-actions/actions/validate-deployment
+        with:
+          config: ${{ needs.configuration.outputs.config }}
+          org: ${{ matrix.org }}
+          orgs-config: ${{ needs.configuration.outputs.orgs-config }}
+          working-directory: source
+          username: ${{ secrets[matrix.usernameSecret] }}
+          client-id: ${{ secrets[matrix.clientIdSecret] }}
+          jwt-private-key: ${{ secrets[matrix.jwtKeySecret] }}
+      - name: Upload validation report
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.validation.outputs.report-path != '' }}
+        with:
+          name: ${{ steps.validation.outputs.artifact-name }}
+          path: ${{ steps.validation.outputs.report-path }}
+          retention-days: 10
+
+  status:
+    name: Salesforce CI Status
+    if: always()
+    needs: [configuration, branch-name, title, code-analyzer, validation]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish job results and enforce required checks
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          ANALYZER_ENABLED: ${{ needs.configuration.outputs.analyzer-enabled }}
+          VALIDATION_ENABLED: ${{ needs.configuration.outputs.validation-enabled }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const jobs = JSON.parse(process.env.JOB_RESULTS);
+          const lines = ['## Salesforce CI results', '', '| Job | Result |', '| --- | --- |'];
+          let failed = false;
+          for (const [name, job] of Object.entries(jobs)) {
+            lines.push(`| ${name} | ${job.result} |`);
+            if (job.result === 'failure' || job.result === 'cancelled') failed = true;
+          }
+          const activePR = process.env.EVENT_NAME === 'pull_request' && process.env.EVENT_ACTION !== 'closed';
+          if (activePR) {
+            for (const name of ['configuration', 'branch-name', 'title']) {
+              if (jobs[name].result !== 'success') failed = true;
+            }
+            for (const [name, required] of [['code-analyzer', process.env.ANALYZER_ENABLED], ['validation', process.env.VALIDATION_ENABLED]]) {
+              if (required === 'true' && jobs[name].result !== 'success') {
+                lines.push('', `Required ${name} did not succeed. Draft/fork restrictions or failed prerequisites can prevent it from running.`);
+                failed = true;
+              }
+            }
+          }
+          lines.push('', 'No actual deployments are performed by this workflow.');
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
+          if (failed) process.exitCode = 1;
+          NODE

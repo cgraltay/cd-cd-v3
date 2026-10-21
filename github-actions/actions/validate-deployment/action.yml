@@ -1,0 +1,42 @@
+name: Validate Salesforce Deployment
+description: Validate a full or PR-changed Salesforce payload with JWT authentication and per-org feedback.
+branding:
+  icon: check-circle
+  color: green
+inputs:
+  config:
+    description: JSON branch configuration, typically the config reader's config output.
+    required: true
+  org:
+    description: Org profile key from the validation matrix.
+    required: true
+  orgs-config:
+    description: Credential-free org profile JSON, preferably the config reader's orgs-config output; overrides the file path.
+  orgs-config-path:
+    description: Fallback credential-free org profile file, relative to GITHUB_WORKSPACE; ignored when orgs-config JSON is supplied.
+  username:
+    description: Integration username from the selected environment secret.
+  client-id:
+    description: OAuth app client ID from the selected environment secret.
+  jwt-private-key:
+    description: Unencrypted RSA private key PEM from a GitHub environment secret, never a committed file.
+  github-token:
+    description: GitHub token to read PR files and write validation feedback.
+    default: ${{ github.token }}
+  working-directory:
+    description: PR source checkout with sfdx-project.json, relative to GITHUB_WORKSPACE.
+    default: .
+outputs:
+  outcome:
+    description: Succeeded, Failed, or Skipped.
+  deployment-id:
+    description: Salesforce dry-run deployment ID, if returned.
+  report-path:
+    description: Sanitized JSON report for workflow artifact upload; empty when no sources matched.
+  artifact-name:
+    description: Safe per-org artifact name.
+  sources-count:
+    description: Number of source paths passed to the validation command.
+runs:
+  using: node24
+  main: dist/index.js

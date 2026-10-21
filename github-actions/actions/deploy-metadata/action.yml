@@ -1,0 +1,71 @@
+name: Deploy Salesforce Metadata
+description: Manually validate, deploy, quick deploy, or reconcile pinned Salesforce releases with per-org cumulative baselines.
+branding:
+  icon: upload-cloud
+  color: green
+inputs:
+  config:
+    description: Branch policy JSON snapshot from SF_CICD_CONFIG.
+    required: true
+  orgs-config:
+    description: Credential-free org profile JSON snapshot from SF_ORGS_CONFIG.
+    required: true
+  source-branch:
+    description: Source branch to deploy, independent of the selected environment and workflow code branch.
+    required: true
+  environment:
+    description: Selected GitHub environment, mapped to exactly one allowed org.
+    required: true
+  operation:
+    description: validate, deploy, quick-deploy, or reconcile a previously recorded pipeline job.
+    default: validate
+  mode:
+    description: configured, full, or delta; Quick Deploy uses the saved validation mode.
+    default: configured
+  to-sha:
+    description: Optional full commit SHA on the selected source branch; otherwise pin its current tip.
+  release-record-id:
+    description: GitHub release deployment record ID for Quick Deploy or report-only reconciliation, not the Salesforce job ID.
+  prepare-only:
+    description: Resolve policy and pin the source commit without Salesforce credentials.
+    default: 'false'
+  github-token:
+    description: Token with contents read and deployments read/write for execution.
+    default: ${{ github.token }}
+  head-sha:
+    description: Immutable selected source commit from preparation.
+  branch-sha:
+    description: Immutable source branch tip from preparation, used to verify ancestry.
+  working-directory:
+    description: Clean source checkout containing sfdx-project.json, relative to GITHUB_WORKSPACE.
+    default: .
+  username:
+    description: Integration username from the selected environment secret.
+  client-id:
+    description: OAuth app client ID from the selected environment secret.
+  jwt-private-key:
+    description: Full unencrypted RSA PEM private key from the selected environment secret.
+outputs:
+  config:
+    description: Branch policy snapshot for execution.
+  orgs-config:
+    description: Org profile snapshot for execution.
+  profile:
+    description: Selected org profile and secret names, without credential values.
+  head-sha:
+    description: Pinned source commit.
+  branch-sha:
+    description: Pinned source branch tip.
+  outcome:
+    description: Succeeded, Failed, or Skipped; validation success never advances actual deployment history.
+  release-record-id:
+    description: GitHub deployment record ID; use this for subsequent Quick Deploy or reconciliation.
+  deployment-id:
+    description: Salesforce validation or actual deployment job ID.
+  report-path:
+    description: Sanitized Salesforce report path, when available.
+  artifact-name:
+    description: Stable safe report artifact name for this org.
+runs:
+  using: node24
+  main: dist/index.js

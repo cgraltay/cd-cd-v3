@@ -1,0 +1,38 @@
+{
+  "name": "salesforce-cicd-actions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Independent TypeScript tooling for Salesforce CI/CD GitHub Actions",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "npm run typecheck && tsx scripts/build.ts",
+    "lint": "eslint .",
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run lint && npm test && npm run build && npm run format:check"
+  },
+  "dependencies": {
+    "@actions/core": "^3.0.1",
+    "@actions/exec": "^3.0.0",
+    "@actions/github": "^9.1.1",
+    "minimatch": "^10.2.6",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.19.2",
+    "@vercel/ncc": "^0.45.0",
+    "eslint": "^10.13.0",
+    "globals": "^16.1.0",
+    "prettier": "^3.5.3",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.0",
+    "yaml": "^2.9.1"
+  }
+}

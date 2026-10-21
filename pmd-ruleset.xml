@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<ruleset
+  name="Salesforce Apex Defaults"
+  xmlns="http://pmd.sourceforge.net/ruleset/2.0.0"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0 https://pmd.github.io/schema/ruleset_2_0_0.xsd"
+>
+    <description
+  >Default Apex security, correctness, best-practice, and performance checks for Salesforce CI.</description>
+    <rule ref="category/apex/security.xml" />
+    <rule ref="category/apex/errorprone.xml" />
+    <rule ref="category/apex/bestpractices.xml" />
+    <rule ref="category/apex/performance.xml" />
+</ruleset>

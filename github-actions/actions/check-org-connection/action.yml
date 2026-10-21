@@ -1,0 +1,32 @@
+name: Check Salesforce Org Connection
+description: Manually verify JWT login and a read-only Salesforce API request with isolated credential cleanup.
+branding:
+  icon: link
+  color: green
+inputs:
+  orgs-config:
+    description: Credential-free org profile JSON, typically vars.SF_ORGS_CONFIG or a captured preparation output.
+    required: true
+  org:
+    description: Org profile key; leave empty in prepare-only mode to select all profiles.
+  prepare-only:
+    description: Build the org/environment matrix without authentication or Salesforce commands.
+    default: 'false'
+  username:
+    description: Integration username from the selected environment secret.
+  client-id:
+    description: OAuth app client ID from the selected environment secret.
+  jwt-private-key:
+    description: Full multiline unencrypted RSA PEM private key from the selected environment secret.
+outputs:
+  matrix:
+    description: Credential-free include matrix for the selected org or all configured orgs.
+  orgs-config:
+    description: Validated profile snapshot for downstream connection jobs.
+  connected:
+    description: True only after JWT authentication and the API request both succeed; false on a failed check.
+  org-id:
+    description: Salesforce organization ID returned by the read-only API check; empty on failure or preparation.
+runs:
+  using: node24
+  main: dist/index.js

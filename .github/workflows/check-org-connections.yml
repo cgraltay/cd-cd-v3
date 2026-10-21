@@ -1,0 +1,66 @@
+name: Check Salesforce Org Connections
+run-name: Org Connection Check | ${{ inputs.org || 'all configured orgs' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: Org profile key to check (leave empty to check all configured orgs)
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare Org Connection Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.prepare.outputs.matrix }}
+      orgs-config: ${{ steps.prepare.outputs.orgs-config }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: .ci
+          persist-credentials: false
+      - name: Select org profiles without authenticating
+        id: prepare
+        uses: ./.ci/github-actions/actions/check-org-connection
+        with:
+          orgs-config: ${{ vars.SF_ORGS_CONFIG }}
+          org: ${{ inputs.org }}
+          prepare-only: "true"
+
+  check:
+    name: Check Connection (${{ matrix.org }})
+    needs: prepare
+    if: needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ matrix.environment }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: .ci
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Install Salesforce CLI
+        run: npm install --global @salesforce/cli
+      - name: Verify JWT authentication and Salesforce API access
+        uses: ./.ci/github-actions/actions/check-org-connection
+        with:
+          orgs-config: ${{ needs.prepare.outputs.orgs-config }}
+          org: ${{ matrix.org }}
+          username: ${{ secrets[matrix.usernameSecret] }}
+          client-id: ${{ secrets[matrix.clientIdSecret] }}
+          jwt-private-key: ${{ secrets[matrix.jwtKeySecret] }}

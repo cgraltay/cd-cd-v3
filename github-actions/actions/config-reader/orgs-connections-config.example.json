@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "orgs": {
+    "development": {
+      "environment": "development",
+      "auth": "jwt",
+      "instanceUrl": "https://test.salesforce.com",
+      "usernameSecret": "SF_USERNAME",
+      "clientIdSecret": "SF_CLIENT_ID",
+      "jwtKeySecret": "SF_JWT_PRIVATE_KEY"
+    },
+    "qa": {
+      "environment": "qa",
+      "auth": "jwt",
+      "instanceUrl": "https://test.salesforce.com",
+      "usernameSecret": "SF_USERNAME",
+      "clientIdSecret": "SF_CLIENT_ID",
+      "jwtKeySecret": "SF_JWT_PRIVATE_KEY"
+    },
+    "uat": {
+      "environment": "uat",
+      "auth": "jwt",
+      "instanceUrl": "https://test.salesforce.com",
+      "usernameSecret": "SF_USERNAME",
+      "clientIdSecret": "SF_CLIENT_ID",
+      "jwtKeySecret": "SF_JWT_PRIVATE_KEY"
+    },
+    "production": {
+      "environment": "production",
+      "auth": "jwt",
+      "instanceUrl": "https://login.salesforce.com",
+      "usernameSecret": "SF_USERNAME",
+      "clientIdSecret": "SF_CLIENT_ID",
+      "jwtKeySecret": "SF_JWT_PRIVATE_KEY"
+    }
+  }
+}
