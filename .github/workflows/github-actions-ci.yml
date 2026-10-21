@@ -1,13 +1,6 @@
 name: github-actions-ci
 
 on:
-  push:
-    paths:
-      - "github-actions/**"
-      - ".github/workflows/github-actions-ci.yml"
-      - ".github/workflows/salesforce-pr-review.yml"
-      - ".github/workflows/check-org-connections.yml"
-      - ".github/workflows/salesforce-release.yml"
   pull_request:
     paths:
       - "github-actions/**"
