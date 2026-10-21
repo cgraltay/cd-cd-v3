@@ -44304,6 +44304,16 @@ async function upsertPullRequestComment(client, pullRequest, comment) {
         });
     }
 }
+async function replacePullRequestComment(client, pullRequest, comment) {
+    const marker = commentMarker(comment.key);
+    await deletePullRequestComment(client, pullRequest, comment);
+    await client.rest.issues.createComment({
+        owner: pullRequest.owner,
+        repo: pullRequest.repo,
+        issue_number: pullRequest.number,
+        body: `${marker}\n${comment.body}`
+    });
+}
 async function deletePullRequestComment(client, pullRequest, comment) {
     const marker = commentMarker(comment.key);
     const { owner, repo, number } = pullRequest;

@@ -47,6 +47,21 @@ export async function upsertPullRequestComment(
   }
 }
 
+export async function replacePullRequestComment(
+  client: ReturnType<typeof getOctokit>,
+  pullRequest: { owner: string; repo: string; number: number },
+  comment: { key: string; body: string }
+): Promise<void> {
+  const marker = commentMarker(comment.key);
+  await deletePullRequestComment(client, pullRequest, comment);
+  await client.rest.issues.createComment({
+    owner: pullRequest.owner,
+    repo: pullRequest.repo,
+    issue_number: pullRequest.number,
+    body: `${marker}\n${comment.body}`
+  });
+}
+
 export async function deletePullRequestComment(
   client: ReturnType<typeof getOctokit>,
   pullRequest: { owner: string; repo: string; number: number },

@@ -12,8 +12,8 @@ The legacy source is retained unchanged.
 - Authenticate the selected org using JWT and a unique temporary alias.
 - Run one `sf project deploy start --dry-run --json` command for the payload.
 - Default to `RunRelevantTests` and a 180-minute wait, matching the old action.
-- Keep a stable PR result comment per org, updating it on reruns without
-  overwriting another org's feedback.
+- Delete the previous bot result comment for the org and create a fresh report
+  at the end of the PR conversation, without touching another org's feedback.
 - Report component, test, and Apex coverage failures in separate sections.
 - Expose sanitized JSON for a workflow artifact, even when validation fails.
 - Treat `NothingToDeploy` as skipped, not failed.
@@ -94,7 +94,9 @@ validation:
     needs.configuration.outputs.validation-enabled == 'true'
   runs-on: ubuntu-latest
   timeout-minutes: 200
-  environment: ${{ matrix.environment }}
+  environment:
+    name: ${{ matrix.environment }}
+    deployment: false
   permissions:
     contents: read
     pull-requests: write
@@ -142,6 +144,12 @@ The default `github-token` is `${{ github.token }}`. Each matrix job binds its
 environment before resolving Secrets. `fail-fast: false` lets other org jobs
 finish after one fails; actual parallelism depends on runner availability.
 
+`deployment: false` retains environment secrets, reviewers, wait timers, and
+branch restrictions without creating automatic GitHub deployment records for
+validation-only jobs. Custom GitHub App deployment protection rules are incompatible
+with this setting; such environments cause the job to fail. Existing deployment
+records are not removed, and actual release jobs keep their deployment tracking.
+
 The example installs `@salesforce/cli` without a version suffix, using npm's
 current stable `latest` release. CLI Node 24 support is required. No Code Analyzer/Java installation
 is needed for validation itself. No tools are installed by the action.
@@ -159,14 +167,22 @@ in the selected org; sandbox/data isolation and least privilege remain essential
 ## Results and Feedback
 
 Failed dry runs publish feedback before the action fails. Successful reruns
-update that org's existing result comment; skipped runs report why no payload
+replace that org's existing result comment; skipped runs report why no payload
 was validated. Artifact upload is a separate workflow step with a 10-day
 retention example. The comment links to the workflow run/artifacts, not an
 artifact ID created inside the action. Upload and comment permission failures
 must not turn a failed Salesforce validation into a pass.
 
-Comments are keyed by a stable org hash and only update matching bot comments.
-Human comments, other actions, and other orgs are untouched. The report and
+Comments use a concise Markdown heading, a bullet summary with inline-code values,
+and separate component/test/coverage failure lists. Detailed stacks and complete
+results remain in the sanitized JSON artifact rather than filling the PR comment.
+
+Comments are keyed by a stable org hash. Each publication deletes all matching bot
+comments, then posts a new comment so the latest result appears at the bottom.
+Human comments, other actions, and other orgs are untouched. Replacement is not
+atomic: if creation fails after deletion, the previous comment is already gone;
+the action warns and preserves the Salesforce result and available report artifact.
+If deletion is forbidden, creation is not attempted. The report and
 comment redact known credentials and sensitive token fields. Raw login output
 is not logged or uploaded; invalid deployment JSON is replaced with a generic
 failure report instead of storing raw stdout/stderr. CLI auth/key state lives

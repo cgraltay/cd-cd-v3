@@ -23,7 +23,7 @@ interface Job {
   if?: string;
   needs?: string | string[];
   permissions?: Record<string, string>;
-  environment?: string;
+  environment?: string | { name: string; deployment: boolean };
   steps: Step[];
   strategy?: { 'fail-fast': boolean; matrix: string };
 }
@@ -131,7 +131,10 @@ test('deployment validation permits a skipped analyzer only when analysis is dis
 test('parallel validation binds profile environments and passes secrets only as action inputs', () => {
   const job = workflow.jobs.validation;
   assert.equal(job.strategy?.['fail-fast'], false);
-  assert.equal(job.environment, '${{ matrix.environment }}');
+  assert.deepEqual(job.environment, {
+    name: '${{ matrix.environment }}',
+    deployment: false
+  });
   assert.ok(job.if?.includes('head.repo.full_name == github.repository'));
   assert.ok(job.if?.includes('draft == false'));
   assert.ok(job.if?.includes("needs.branch-name.result == 'success'"));
@@ -443,17 +446,20 @@ test('aggregate status script handles enabled, skipped, failed, cancelled, and m
   }
 });
 
-test('tooling CI runs workflow tests when the main workflow changes', () => {
+test('tooling CI checks PR workflow changes and supports manual runs without push runs', () => {
   const tooling = parseDocument(
     readFileSync(
       path.join(repository, '.github', 'workflows', 'github-actions-ci.yml'),
       'utf8'
     )
   ).toJS() as { on: Record<string, { paths: string[] }> };
-  for (const event of ['push', 'pull_request'])
-    assert.ok(
-      tooling.on[event].paths.includes(
-        '.github/workflows/salesforce-pr-review.yml'
-      )
-    );
+  assert.deepEqual(Object.keys(tooling.on).sort(), [
+    'pull_request',
+    'workflow_dispatch'
+  ]);
+  assert.ok(
+    tooling.on.pull_request.paths.includes(
+      '.github/workflows/salesforce-pr-review.yml'
+    )
+  );
 });

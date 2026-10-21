@@ -529,8 +529,161 @@ test('validation comments isolate orgs and keep component, test, and coverage se
   assert.match(body, /Test Failures/);
   assert.match(body, /Coverage Failures/);
   assert.ok(body.includes('force-app/classes/X.cls'));
-  assert.ok(body.includes('Source paths: 2'));
+  assert.ok(body.includes('- Source paths: `2`'));
   assert.ok(body.includes('&lt;&#64;team&amp;&gt;'));
+  assert.match(body, /## Deployment Dry Run Failed/);
+  assert.ok(body.includes('- Org: `qa`'));
+  assert.ok(body.includes('- Environment: `salesforce-qa`'));
+  assert.ok(body.includes('- `force-app/classes/X.cls` (line 2)'));
+  assert.ok(body.includes('Component: `ApexClass` `X`'));
+  assert.ok(body.includes('- `XTest.fails`'));
+  assert.ok(!body.includes('<pre>'));
+});
+
+test('validation report deletes old bot comments and posts a fresh concise Markdown report at the end', async () => {
+  const { getOctokit } = await import('@actions/github');
+  const marker = `<!-- sf-cicd:${validationCommentKey('qa')} -->`;
+  const comments = [
+    { id: 1, body: marker, user: { type: 'Bot' } },
+    { id: 2, body: marker, user: { type: 'User' } },
+    { id: 3, body: '<!-- sf-cicd:pr-title-checker -->', user: { type: 'Bot' } },
+    { id: 4, body: marker, user: { type: 'Bot' } },
+    {
+      id: 5,
+      body: `<!-- sf-cicd:${validationCommentKey('uat')} -->`,
+      user: { type: 'Bot' }
+    }
+  ];
+  const writes: string[] = [];
+  let nextId = 6;
+  const client = getOctokit('test-token-not-a-secret', {
+    request: {
+      fetch: async (input: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        if (request.method === 'GET') {
+          if (url.searchParams.get('page') === '2')
+            return Response.json(comments.slice(3));
+          return Response.json(comments.slice(0, 3), {
+            headers: {
+              link: `<${url.origin}${url.pathname}?page=2>; rel="next"`
+            }
+          });
+        }
+        writes.push(request.method);
+        if (request.method === 'DELETE') {
+          const id = Number(url.pathname.split('/').at(-1));
+          assert.ok([1, 4, 6].includes(id));
+          comments.splice(
+            comments.findIndex((comment) => comment.id === id),
+            1
+          );
+          return new Response(null, { status: 204 });
+        }
+        assert.equal(request.method, 'POST');
+        assert.ok(
+          !comments.some(
+            (comment) =>
+              comment.user.type === 'Bot' && comment.body.includes(marker)
+          )
+        );
+        const payload = (await request.json()) as { body: string };
+        const created = {
+          id: nextId++,
+          body: payload.body,
+          user: { type: 'Bot' }
+        };
+        comments.push(created);
+        return Response.json(created, { status: 201 });
+      }
+    }
+  });
+  const options = {
+    org: 'qa',
+    environment: 'salesforce-qa',
+    testLevel: 'RunRelevantTests',
+    sources: ['force-app'],
+    sourceCount: 1
+  };
+  for (const success of [false, true]) {
+    await publishValidationComment(
+      client,
+      { owner: 'example', repo: 'salesforce', number: 42 },
+      {
+        ...options,
+        result: parseDryRun(
+          JSON.stringify({
+            status: success ? 0 : 1,
+            message: 'Details <@team&> [link](https://example.invalid) ```',
+            result: { status: success ? 'Succeeded' : 'Failed', success }
+          }),
+          success ? 0 : 1
+        )
+      }
+    );
+    assert.equal(comments.length, 4);
+    assert.deepEqual(
+      comments.slice(0, 3).map((comment) => comment.id),
+      [2, 3, 5]
+    );
+    const body = comments.at(-1)!.body;
+    assert.match(
+      body,
+      new RegExp(`## Deployment Dry Run ${success ? 'Succeeded' : 'Failed'}`)
+    );
+    assert.ok(body.includes('No component failures.'));
+    assert.ok(body.includes('No test failures.'));
+    assert.ok(body.includes('No coverage failures.'));
+    assert.ok(
+      body.includes(
+        'Details &lt;&#64;team&amp;&gt; \\[link\\]\\(https://example.invalid\\) \\`\\`\\`'
+      )
+    );
+    assert.ok(!body.includes('<pre>'));
+  }
+  assert.deepEqual(writes, ['DELETE', 'DELETE', 'POST', 'DELETE', 'POST']);
+});
+
+test('validation report does not create a duplicate when deleting the previous comment is forbidden', async () => {
+  const { getOctokit } = await import('@actions/github');
+  const methods: string[] = [];
+  const client = getOctokit('test-token-not-a-secret', {
+    request: {
+      fetch: async (input: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(input, init);
+        methods.push(request.method);
+        if (request.method === 'GET')
+          return Response.json([
+            {
+              id: 1,
+              body: `<!-- sf-cicd:${validationCommentKey('qa')} -->`,
+              user: { type: 'Bot' }
+            }
+          ]);
+        assert.equal(request.method, 'DELETE');
+        return Response.json({ message: 'Forbidden' }, { status: 403 });
+      }
+    }
+  });
+  await assert.rejects(
+    publishValidationComment(
+      client,
+      { owner: 'example', repo: 'salesforce', number: 42 },
+      {
+        org: 'qa',
+        environment: 'salesforce-qa',
+        testLevel: 'RunRelevantTests',
+        sources: ['force-app'],
+        sourceCount: 1,
+        result: parseDryRun(
+          '{"status":0,"result":{"success":true,"status":"Succeeded"}}',
+          0
+        )
+      }
+    ),
+    (error: unknown) => (error as { status: number }).status === 403
+  );
+  assert.deepEqual(methods, ['GET', 'DELETE']);
 });
 
 test('compiled validation action authenticates, dry-runs, reports per org, and cleans up', async (context) => {
@@ -636,6 +789,15 @@ test('compiled validation action authenticates, dry-runs, reports per org, and c
     if (denyWrites) {
       response.statusCode = 403;
       response.end(JSON.stringify({ message: 'Forbidden' }));
+      return;
+    }
+    if (request.method === 'DELETE') {
+      const index = comments.findIndex(
+        (entry) => entry.id === Number(pathname.split('/').at(-1))
+      );
+      if (index !== -1) comments.splice(index, 1);
+      response.statusCode = 204;
+      response.end();
       return;
     }
     let body = '';
@@ -889,8 +1051,15 @@ test('compiled validation action authenticates, dry-runs, reports per org, and c
     }
   );
   await context.test(
-    'failed validations update the same org comment before failing the action',
+    'failed validations replace the old org comment at the end before failing the action',
     async () => {
+      const previous = comments.find((entry) =>
+        entry.body.includes(validationCommentKey('qa'))
+      );
+      assert.ok(previous);
+      const other = comments.find((entry) =>
+        entry.body.includes(validationCommentKey('uat'))
+      );
       const result = await runAction('qa', 'failed');
       assert.equal(result.code, 1, result.stdout);
       assert.equal(result.outputs.outcome, 'Failed');
@@ -899,6 +1068,13 @@ test('compiled validation action authenticates, dry-runs, reports per org, and c
         entry.body.includes(validationCommentKey('qa'))
       );
       assert.ok(comment);
+      assert.notEqual(comment.id, previous.id);
+      assert.ok(!comments.some((entry) => entry.id === previous.id));
+      assert.equal(comments.at(-1)?.id, comment.id);
+      assert.equal(
+        comments.find((entry) => entry.id === other?.id),
+        other
+      );
       for (const heading of [
         'Component Failures',
         'Test Failures',

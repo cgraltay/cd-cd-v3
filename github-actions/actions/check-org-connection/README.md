@@ -29,6 +29,11 @@ jobs use the same snapshot; `fail-fast: false` lets others finish if one fails.
 Selection is limited to 1-256 configured profiles. Empty configurations and
 unknown org selections fail before authentication.
 
+The environment binding uses `deployment: false`: secrets, reviewers, wait timers,
+and branch policies still apply, but a successful connection check does not create
+a misleading GitHub deployment record. Existing records remain. Custom GitHub App
+deployment protection rules are incompatible and cause the job to fail.
+
 The workflow requests only `contents: read` on GitHub and has no automatic
 triggers. Each checking job installs Node.js 24 and the unversioned
 `@salesforce/cli` package. No Java, Code Analyzer plugin, Salesforce project,

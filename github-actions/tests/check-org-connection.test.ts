@@ -260,7 +260,7 @@ test('org connection workflow is manual-only, environment-scoped, and read-only 
       string,
       {
         needs?: string;
-        environment?: string;
+        environment?: string | { name: string; deployment: boolean };
         strategy?: { 'fail-fast': boolean; matrix: string };
         steps: {
           uses?: string;
@@ -281,7 +281,10 @@ test('org connection workflow is manual-only, environment-scoped, and read-only 
   assert.ok(!JSON.stringify(workflow.jobs.prepare).includes('secrets['));
   const check = workflow.jobs.check;
   assert.equal(check.needs, 'prepare');
-  assert.equal(check.environment, '${{ matrix.environment }}');
+  assert.deepEqual(check.environment, {
+    name: '${{ matrix.environment }}',
+    deployment: false
+  });
   assert.equal(check.strategy?.['fail-fast'], false);
   assert.equal(
     check.strategy?.matrix,
@@ -315,12 +318,11 @@ test('org connection workflow is manual-only, environment-scoped, and read-only 
       'utf8'
     )
   ).toJS() as { on: Record<string, { paths: string[] }> };
-  for (const event of ['push', 'pull_request'])
-    assert.ok(
-      tooling.on[event].paths.includes(
-        '.github/workflows/check-org-connections.yml'
-      )
-    );
+  assert.ok(
+    tooling.on.pull_request.paths.includes(
+      '.github/workflows/check-org-connections.yml'
+    )
+  );
 });
 
 test('compiled connection action plans without secrets, checks API access, and rejects non-manual events', (context) => {
