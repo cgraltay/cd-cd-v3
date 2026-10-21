@@ -166,6 +166,14 @@ state and cleans it on normal/caught completion. Use ephemeral runners; hard kil
 still require runner cleanup. The workflow installs `@salesforce/cli` without a
 version suffix, so npm resolves its current latest release.
 
+Each caller must set `secrets: inherit` on its job calling `release-execution.yml`.
+GitHub requires secrets to be forwarded across that reusable-workflow boundary,
+even when their values come from the environment selected by the called job.
+Keep JWT values in environment secrets; matching environment secrets take
+precedence over repository/organization secrets. Profile fields contain secret
+names only. A preflight step checks those names before installing Salesforce CLI
+and reports missing names without printing credential values.
+
 Reports are sanitized, uploaded even after failure when available, and retained
 for 10 days. Raw login output and credentials are never intentionally published.
 Keep `waitMinutes` below the 360-minute runner limit with time for setup. Workflow

@@ -36,6 +36,7 @@ permissions:
 jobs:
   release:
     uses: ./.github/workflows/release-execution.yml
+    secrets: inherit
     with:
       selection: commit-range
       source-branch: ${{ inputs.source-branch }}

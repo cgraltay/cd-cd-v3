@@ -97,6 +97,28 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+      - name: Check required JWT secrets
+        env:
+          RELEASE_PROFILE: ${{ needs.prepare.outputs.profile }}
+          RELEASE_ENVIRONMENT: ${{ inputs.environment }}
+          JWT_USERNAME: ${{ secrets[fromJSON(needs.prepare.outputs.profile).usernameSecret] }}
+          JWT_CLIENT_ID: ${{ secrets[fromJSON(needs.prepare.outputs.profile).clientIdSecret] }}
+          JWT_PRIVATE_KEY: ${{ secrets[fromJSON(needs.prepare.outputs.profile).jwtKeySecret] }}
+        run: |
+          node <<'NODE'
+          const profile = JSON.parse(process.env.RELEASE_PROFILE);
+          const required = [
+            ['JWT_USERNAME', profile.usernameSecret],
+            ['JWT_CLIENT_ID', profile.clientIdSecret],
+            ['JWT_PRIVATE_KEY', profile.jwtKeySecret]
+          ];
+          const missing = required.filter(([variable]) => !process.env[variable]?.trim());
+          if (missing.length) {
+            console.error('Missing JWT secrets for environment ' + process.env.RELEASE_ENVIRONMENT + ': ' + missing.map(([, name]) => name).join(', ') + '. Check caller secret forwarding and the selected environment secret names.');
+            process.exit(1);
+          }
+          console.log('Required JWT credentials are available. Values are not printed.');
+          NODE
       - name: Install Salesforce CLI
         run: npm install --global @salesforce/cli
       - name: Validate or Deploy Full Branch

@@ -21,6 +21,7 @@ permissions:
 jobs:
   release:
     uses: ./.github/workflows/release-execution.yml
+    secrets: inherit
     with:
       operation: reconcile
       environment: ${{ inputs.environment }}

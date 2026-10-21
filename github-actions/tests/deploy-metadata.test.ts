@@ -797,6 +797,7 @@ test('focused manual workflows expose only relevant inputs and share pinned envi
       entry.jobs.release.uses,
       './.github/workflows/release-execution.yml'
     );
+    assert.equal(entry.jobs.release.secrets, 'inherit');
   }
   assert.equal(workflow.jobs.prepare.permissions.deployments, 'read');
   const release = workflow.jobs.release;
@@ -854,6 +855,79 @@ test('focused manual workflows expose only relevant inputs and share pinned envi
       '.github/workflows/release-execution.yml'
     )
   );
+});
+
+test('release secret preflight checks selected secret names without printing credential values', () => {
+  const root = path.resolve(__dirname, '../..');
+  const workflow = parse(
+    readFileSync(
+      path.join(root, '.github/workflows/release-execution.yml'),
+      'utf8'
+    )
+  );
+  const steps = workflow.jobs.release.steps;
+  const guard = steps.find(
+    (step: { name?: string }) => step.name === 'Check required JWT secrets'
+  );
+  assert.ok(guard);
+  assert.ok(
+    steps.indexOf(guard) <
+      steps.findIndex(
+        (step: { run?: string }) =>
+          step.run === 'npm install --global @salesforce/cli'
+      )
+  );
+  assert.deepEqual(guard.env, {
+    RELEASE_PROFILE: '${{ needs.prepare.outputs.profile }}',
+    RELEASE_ENVIRONMENT: '${{ inputs.environment }}',
+    JWT_USERNAME:
+      '${{ secrets[fromJSON(needs.prepare.outputs.profile).usernameSecret] }}',
+    JWT_CLIENT_ID:
+      '${{ secrets[fromJSON(needs.prepare.outputs.profile).clientIdSecret] }}',
+    JWT_PRIVATE_KEY:
+      '${{ secrets[fromJSON(needs.prepare.outputs.profile).jwtKeySecret] }}'
+  });
+  const match = guard.run.match(/^node <<'NODE'\n([\s\S]*?)\nNODE\s*$/);
+  assert.ok(match);
+  for (const missing of [
+    [],
+    ['JWT_USERNAME'],
+    ['JWT_CLIENT_ID'],
+    ['JWT_PRIVATE_KEY'],
+    ['JWT_USERNAME', 'JWT_CLIENT_ID', 'JWT_PRIVATE_KEY']
+  ]) {
+    const credentials = {
+      JWT_USERNAME: 'fake-user-do-not-print',
+      JWT_CLIENT_ID: 'fake-client-do-not-print',
+      JWT_PRIVATE_KEY: 'fake-key-do-not-print\nmultiline'
+    };
+    const env = {
+      ...process.env,
+      RELEASE_PROFILE: JSON.stringify(profiles.orgs.qa),
+      RELEASE_ENVIRONMENT: 'salesforce-qa',
+      ...credentials,
+      ...Object.fromEntries(missing.map((name) => [name, '']))
+    };
+    const result = spawnSync(process.execPath, ['-e', match[1]], {
+      encoding: 'utf8',
+      env
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, missing.length ? 1 : 0, result.stderr);
+    const output = result.stdout + result.stderr;
+    for (const value of Object.values(credentials))
+      assert.ok(!output.includes(value));
+    if (missing.length) {
+      assert.match(output, /Missing JWT secrets for environment salesforce-qa/);
+      const names = {
+        JWT_USERNAME: 'SF_USERNAME',
+        JWT_CLIENT_ID: 'SF_CLIENT_ID',
+        JWT_PRIVATE_KEY: 'SF_JWT_PRIVATE_KEY'
+      };
+      for (const name of missing)
+        assert.ok(output.includes(names[name as keyof typeof names]));
+    }
+  }
 });
 
 test('compiled focused release rejects invalid routing and reaches isolated JWT execution without a prepare-only input', (context) => {
