@@ -691,12 +691,11 @@ test('manual release workflow separates branch/environment, snapshots config, pi
       'utf8'
     )
   );
-  for (const event of ['push', 'pull_request'])
-    assert.ok(
-      tooling.on[event].paths.includes(
-        '.github/workflows/salesforce-release.yml'
-      )
-    );
+  assert.ok(
+    tooling.on.pull_request.paths.includes(
+      '.github/workflows/salesforce-release.yml'
+    )
+  );
 });
 
 test('GitHub history filters task/org, paginates records and statuses, and ignores automatic environment inactivation', async () => {

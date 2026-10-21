@@ -446,17 +446,20 @@ test('aggregate status script handles enabled, skipped, failed, cancelled, and m
   }
 });
 
-test('tooling CI runs workflow tests when the main workflow changes', () => {
+test('tooling CI checks PR workflow changes and supports manual runs without push runs', () => {
   const tooling = parseDocument(
     readFileSync(
       path.join(repository, '.github', 'workflows', 'github-actions-ci.yml'),
       'utf8'
     )
   ).toJS() as { on: Record<string, { paths: string[] }> };
-  for (const event of ['push', 'pull_request'])
-    assert.ok(
-      tooling.on[event].paths.includes(
-        '.github/workflows/salesforce-pr-review.yml'
-      )
-    );
+  assert.deepEqual(Object.keys(tooling.on).sort(), [
+    'pull_request',
+    'workflow_dispatch'
+  ]);
+  assert.ok(
+    tooling.on.pull_request.paths.includes(
+      '.github/workflows/salesforce-pr-review.yml'
+    )
+  );
 });
