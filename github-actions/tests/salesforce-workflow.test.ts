@@ -242,7 +242,7 @@ test('Salesforce CLI installs use the unversioned package requested by the workf
 test('failed validation and analyzer runs still expose report artifacts', () => {
   for (const name of ['validation', 'code-analyzer']) {
     const step = workflow.jobs[name].steps.find(
-      (candidate) => candidate.uses === 'actions/upload-artifact@v4'
+      (candidate) => candidate.uses === 'actions/upload-artifact@v7'
     );
     assert.ok(step?.if?.includes('!cancelled()'));
     assert.ok(step?.if?.includes('report-path'));

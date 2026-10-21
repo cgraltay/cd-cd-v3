@@ -132,7 +132,7 @@ jobs:
         with:
           config: ${{ vars.SF_CICD_CONFIG }}
           working-directory: source
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() && steps.analyzer.outputs.report-path != '' }}
         with:
           name: salesforce-code-analyzer

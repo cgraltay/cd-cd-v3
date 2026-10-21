@@ -430,7 +430,7 @@ jobs:
           username: ${{ secrets[matrix.usernameSecret] }}
           client-id: ${{ secrets[matrix.clientIdSecret] }}
           jwt-private-key: ${{ secrets[matrix.jwtKeySecret] }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() && steps.validation.outputs.report-path != '' }}
         with:
           name: ${{ steps.validation.outputs.artifact-name }}
