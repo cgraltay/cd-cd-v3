@@ -515,12 +515,23 @@ test('manual validation, deploy, quick deploy, and recovery preserve baseline an
       stdout: JSON.stringify(body),
       stderr: ''
     });
-    if (args[0] === 'org') return response({ status: 0 });
-    if (args[0] === 'data')
+    if (args[0] === 'org' && args[1] === 'login')
+      return response({ status: 0 });
+    if (args[0] === 'org' && args[1] === 'display')
       return response({
         status: 0,
-        result: { done: true, totalSize: 1, records: [{ Id: orgId }] }
+        result: { id: orgId, accessToken: 'DO-NOT-LOG' }
       });
+    if (args[0] === 'api')
+      return response({
+        query: '/services/data/v66.0/query',
+        sobjects: '/services/data/v66.0/sobjects'
+      });
+    assert.notEqual(
+      args[0],
+      'data',
+      'Release identity must not require Organization SOQL access.'
+    );
     if (args[2] === 'report')
       return response(
         report(

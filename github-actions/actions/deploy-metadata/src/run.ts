@@ -19,6 +19,7 @@ import {
 } from './history';
 import type { ReleaseOperation, releasePlan } from './plan';
 import { assertAncestor, releaseSources } from './source';
+import { verifyOrgApi } from '../../../shared/org-api';
 
 export interface ReleaseOptions extends JwtOptions {
   plan: ReturnType<typeof releasePlan>;
@@ -85,34 +86,7 @@ export async function runRelease(options: ReleaseOptions): Promise<{
   entry?: ReleaseEntry;
 }> {
   return withJwtOrg(options, async ({ alias, run }) => {
-    const identityResponse = await run([
-      'data',
-      'query',
-      '--query',
-      'SELECT Id FROM Organization LIMIT 1',
-      '--target-org',
-      alias,
-      '--json'
-    ]);
-    if (identityResponse.exitCode !== 0)
-      throw new Error('Unable to verify Salesforce org identity.');
-    const identity = z
-      .object({
-        status: z.literal(0),
-        result: z.object({
-          done: z.literal(true),
-          totalSize: z.literal(1),
-          records: z
-            .array(
-              z.object({
-                Id: z.string().regex(/^00D[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/)
-              })
-            )
-            .length(1)
-        })
-      })
-      .parse(json(identityResponse));
-    const orgId = identity.result.records[0].Id;
+    const { orgId } = await verifyOrgApi({ alias, run });
     const entries = await options.history.list();
     const current = baseline(entries, orgId);
     const plan = options.plan;

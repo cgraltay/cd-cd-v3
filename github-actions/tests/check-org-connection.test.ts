@@ -110,7 +110,7 @@ test('org check verifies live API access after isolated JWT login and removes lo
       home = options.env.HOME;
       assert.equal(options.env.GITHUB_TOKEN, undefined);
       assert.equal(options.env['INPUT_JWT-PRIVATE-KEY'], undefined);
-      if (args[0] === 'org') {
+      if (args[0] === 'org' && args[1] === 'login') {
         const keyFile = args[args.indexOf('--jwt-key-file') + 1];
         assert.equal(statSync(keyFile).mode & 0o777, 0o600);
         assert.equal(readFileSync(keyFile, 'utf8'), privateKey);
@@ -120,30 +120,34 @@ test('org check verifies live API access after isolated JWT login and removes lo
           stderr: ''
         };
       }
+      if (args[0] === 'org' && args[1] === 'display') {
+        return {
+          exitCode: 0,
+          stdout:
+            '{"status":0,"result":{"id":"00D000000000001AAA","accessToken":"DO-NOT-LOG"}}',
+          stderr: ''
+        };
+      }
       assert.deepEqual(args.slice(0, 4), [
-        'data',
-        'query',
-        '--query',
-        'SELECT Id FROM Organization LIMIT 1'
+        'api',
+        'request',
+        'rest',
+        '/services/data/v66.0/'
       ]);
       assert.ok(!args.includes('--dry-run'));
       assert.ok(!args.includes('deploy'));
       return {
         exitCode: 0,
         stdout: JSON.stringify({
-          status: 0,
-          result: {
-            done: true,
-            totalSize: 1,
-            records: [{ Id: '00D000000000001AAA' }]
-          }
+          query: '/services/data/v66.0/query',
+          sobjects: '/services/data/v66.0/sobjects'
         }),
         stderr: ''
       };
     }
   });
   assert.deepEqual(result, { orgId: '00D000000000001AAA' });
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
   assert.equal(existsSync(home), false);
 });
 
@@ -151,7 +155,8 @@ for (const mode of [
   'auth-failure',
   'api-failure',
   'invalid-json',
-  'incomplete-result'
+  'incomplete-result',
+  'invalid-org-id'
 ]) {
   test(`org connection ${mode} fails safely and cleans up credentials`, async (context) => {
     const directory = mkdtempSync(
@@ -170,10 +175,25 @@ for (const mode of [
           tempDirectory: directory,
           execute: async (args, options) => {
             home = options.env.HOME;
-            if (args[0] === 'org')
+            if (args[0] === 'org' && args[1] === 'login')
               return {
                 exitCode: mode === 'auth-failure' ? 1 : 0,
                 stdout: 'SECRET-AUTH-RESPONSE',
+                stderr: ''
+              };
+            if (args[0] === 'org' && args[1] === 'display')
+              return {
+                exitCode: 0,
+                stdout: JSON.stringify({
+                  status: 0,
+                  result: {
+                    id:
+                      mode === 'invalid-org-id'
+                        ? 'INVALID'
+                        : '00D000000000001AAA',
+                    accessToken: 'SECRET-AUTH-RESPONSE'
+                  }
+                }),
                 stderr: ''
               };
             return {
@@ -336,16 +356,18 @@ test('compiled connection action plans without secrets, checks API access, and r
       "const fs = require('node:fs'); const args = process.argv.slice(2);",
       "if (process.env.GITHUB_TOKEN || process.env['INPUT_JWT-PRIVATE-KEY']) throw new Error('Credential environment leaked');",
       "fs.appendFileSync(process.env.FAKE_TRACE, JSON.stringify({ command: args[0], home: process.env.HOME }) + '\\n');",
-      "if (args[0] === 'org') {",
+      "if (args[0] === 'org' && args[1] === 'login') {",
       "  const key = args[args.indexOf('--jwt-key-file') + 1];",
       '  if ((fs.statSync(key).mode & 0o777) !== 0o600) process.exit(8);',
       "  if (process.env.FAKE_MODE === 'auth-failure') { console.log('RAW-SECRET-AUTH-ERROR'); process.exit(1); }",
       "  console.log(JSON.stringify({ status: 0, result: { accessToken: 'RAW-SECRET-LOGIN-TOKEN' } }));",
+      "} else if (args[0] === 'org' && args[1] === 'display') {",
+      "  console.log(JSON.stringify({ status: 0, result: { id: process.env.FAKE_MODE === 'invalid-org-id' ? 'INVALID' : '00D000000000001AAA', accessToken: 'RAW-SECRET-DISPLAY-TOKEN' } }));",
       '} else {',
-      "  if (args[0] !== 'data' || args[1] !== 'query' || args.includes('deploy')) process.exit(8);",
+      "  if (args[0] !== 'api' || args[1] !== 'request' || args[2] !== 'rest' || args[3] !== '/services/data/v66.0/' || args.includes('deploy')) process.exit(8);",
       "  if (process.env.FAKE_MODE === 'api-failure') { console.log('RAW-SECRET-API-ERROR'); process.exit(1); }",
       "  if (process.env.FAKE_MODE === 'invalid-json') { console.log('RAW-SECRET-API-RESPONSE'); process.exit(0); }",
-      "  console.log(JSON.stringify({ status: 0, result: { done: true, totalSize: 1, records: [{ Id: '00D000000000001AAA' }] } }));",
+      "  console.log(JSON.stringify({ query: '/services/data/v66.0/query', sobjects: '/services/data/v66.0/sobjects' }));",
       '}'
     ].join('\n'),
     { mode: 0o755 }
@@ -433,7 +455,12 @@ test('compiled connection action plans without secrets, checks API access, and r
   assert.equal(success.outputs['org-id'], '00D000000000001AAA');
   assert.match(success.markdown, /Connected/);
 
-  for (const mode of ['auth-failure', 'api-failure', 'invalid-json']) {
+  for (const mode of [
+    'auth-failure',
+    'api-failure',
+    'invalid-json',
+    'invalid-org-id'
+  ]) {
     const failed = runAction({ mode });
     assert.equal(failed.status, 1, failed.stderr);
     assert.equal(failed.outputs.connected, 'false');

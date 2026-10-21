@@ -101,7 +101,7 @@ Run **Actions > Check Salesforce Org Connections > Run workflow** after setting
 the profiles and environment Secrets. Select one exact org key or leave the
 selection empty to check all configured orgs in parallel. The workflow is
 dispatch-only; it does not run on PRs or pushes and performs no deployments.
-It verifies JWT login plus a read-only API query and reports the org ID.
+It verifies JWT login plus an authenticated read-only REST resources request and reports the org ID; no Organization SOQL access is required.
 See the [connection action guide](../check-org-connection/README.md) for details.
 
 ## Operational Safety
