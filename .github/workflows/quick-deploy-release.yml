@@ -1,0 +1,27 @@
+name: Quick Deploy
+run-name: Quick Deploy | ${{ inputs.environment }} | ${{ inputs.release-record-id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target org environment
+        type: environment
+        required: true
+      release-record-id:
+        description: Saved validation reference, such as validation:123
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  checks: write
+  deployments: write
+
+jobs:
+  release:
+    uses: ./.github/workflows/release-execution.yml
+    with:
+      operation: quick-deploy
+      environment: ${{ inputs.environment }}
+      release-record-id: ${{ inputs.release-record-id }}

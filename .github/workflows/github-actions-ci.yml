@@ -7,7 +7,10 @@ on:
       - ".github/workflows/github-actions-ci.yml"
       - ".github/workflows/salesforce-pr-review.yml"
       - ".github/workflows/check-org-connections.yml"
-      - ".github/workflows/salesforce-release.yml"
+      - ".github/workflows/release-execution.yml"
+      - ".github/workflows/validate-deploy-*.yml"
+      - ".github/workflows/quick-deploy-release.yml"
+      - ".github/workflows/reconcile-release.yml"
   workflow_dispatch:
 
 permissions:

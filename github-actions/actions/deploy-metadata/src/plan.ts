@@ -1,10 +1,37 @@
 import { resolveConfig } from '../../config-reader/src/config';
 import { orgConnection, type OrgsConfig } from '../../../shared/orgs';
 import { validationSettingsSchema } from '../../validate-deployment/src/validation';
-import { shaSchema, type ReleaseEntry } from './history';
 
 export type ReleaseOperation =
   'validate' | 'deploy' | 'quick-deploy' | 'reconcile';
+
+export function environmentOrg(orgs: OrgsConfig, environment: string): string {
+  const selected = Object.keys(orgs.orgs).filter(
+    (org) => orgs.orgs[org].environment === environment
+  );
+  if (selected.length !== 1)
+    throw new Error(
+      'The selected GitHub environment must map to exactly one org profile.'
+    );
+  return selected[0];
+}
+
+export function recordReference(value: string, operation: ReleaseOperation) {
+  const match = /^(validation|deployment):([1-9][0-9]*)$/.exec(value);
+  if (
+    !match ||
+    !Number.isSafeInteger(Number(match[2])) ||
+    (operation === 'quick-deploy' && match[1] !== 'validation')
+  ) {
+    throw new Error(
+      'Use a saved reference such as validation:123 or deployment:456. Quick Deploy requires a validation reference.'
+    );
+  }
+  return {
+    recordKind: match[1] as 'validation' | 'deployment',
+    recordId: Number(match[2])
+  };
+}
 
 export function releasePlan(
   config: Record<string, unknown>,
@@ -16,14 +43,7 @@ export function releasePlan(
   if (!branch.trim() || !environment.trim()) {
     throw new Error('A target branch and GitHub environment are required.');
   }
-  const selected = Object.keys(orgs.orgs).filter(
-    (org) => orgs.orgs[org].environment === environment
-  );
-  if (selected.length !== 1) {
-    throw new Error(
-      'The selected GitHub environment must map to exactly one org profile.'
-    );
-  }
+  const org = environmentOrg(orgs, environment);
   const plan = resolveConfig(config, branch);
   const deployment = plan.branchConfig.deployment as
     Record<string, unknown> | undefined;
@@ -32,7 +52,7 @@ export function releasePlan(
     !deployment ||
     deployment.enabled !== true ||
     !Array.isArray(deployment.orgs) ||
-    !deployment.orgs.includes(selected[0])
+    !deployment.orgs.includes(org)
   ) {
     throw new Error(
       'Deployment is not enabled for this branch and selected environment/org.'
@@ -43,43 +63,10 @@ export function releasePlan(
     mode: mode === 'configured' ? deployment.mode : mode
   });
   return {
-    org: selected[0],
-    profile: orgConnection(orgs, selected[0]),
+    org,
+    profile: orgConnection(orgs, org),
     branch,
     environment,
     settings
   };
-}
-
-export function releaseTarget(
-  plan: ReturnType<typeof releasePlan>,
-  operation: ReleaseOperation,
-  branchSha: string,
-  toSha: string,
-  entries: ReleaseEntry[],
-  recordId?: number
-) {
-  shaSchema.parse(branchSha);
-  if (operation === 'quick-deploy' || operation === 'reconcile') {
-    const entry = entries.find((candidate) => candidate.id === recordId);
-    if (
-      !entry ||
-      entry.receipt.branch !== plan.branch ||
-      entry.receipt.environment !== plan.environment ||
-      (operation === 'quick-deploy' &&
-        (entry.receipt.operation !== 'validate' || entry.state !== 'success'))
-    ) {
-      throw new Error(
-        'Select a matching recorded validation/release for this source branch and environment.'
-      );
-    }
-    if (toSha && toSha !== entry.receipt.headSha)
-      throw new Error('The selected commit differs from the saved release.');
-    return { headSha: entry.receipt.headSha, branchSha };
-  }
-  if (recordId)
-    throw new Error(
-      'Release record ID is only used for Quick Deploy or reconciliation.'
-    );
-  return { headSha: shaSchema.parse(toSha || branchSha), branchSha };
 }

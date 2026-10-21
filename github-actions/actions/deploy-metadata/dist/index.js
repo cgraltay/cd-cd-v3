@@ -36896,7 +36896,7 @@ function _number(Class, params) {
 }
 // @__NO_SIDE_EFFECTS__
 function _coercedNumber(Class, params) {
-    return new Class(snapshotChecks({ type: "number", coerce: true, checks: [], ...normalizeParams(params) }));
+    return new Class(snapshotChecks({ type: "number", coerce: true, checks: [], ...util.normalizeParams(params) }));
 }
 // @__NO_SIDE_EFFECTS__
 function _int(Class, params) {
@@ -41357,25 +41357,6 @@ function preprocess(fn, schema) {
     });
 }
 
-;// CONCATENATED MODULE: ./node_modules/zod/v4/classic/coerce.js
-
-
-function coerce_string(params) {
-    return core._coercedString(schemas.ZodString, params);
-}
-function coerce_number(params) {
-    return _coercedNumber(ZodNumber, params);
-}
-function coerce_boolean(params) {
-    return core._coercedBoolean(schemas.ZodBoolean, params);
-}
-function coerce_bigint(params) {
-    return core._coercedBigint(schemas.ZodBigInt, params);
-}
-function coerce_date(params) {
-    return core._coercedDate(schemas.ZodDate, params);
-}
-
 ;// CONCATENATED MODULE: ./node_modules/balanced-match/dist/esm/index.js
 const balanced = (a, b, str) => {
     const ma = a instanceof RegExp ? maybeMatch(a, str) : a;
@@ -44447,29 +44428,20 @@ const receiptSchema = object({
     branch: schemas_string().min(1),
     headSha: shaSchema,
     baseSha: shaSchema.optional(),
-    baselineId: schemas_number().int().positive().nullable(),
+    baselineId: schemas_number().int().positive().nullable().optional(),
+    selection: schemas_enum(['full-branch', 'commit-range', 'branch-changes'])
+        .optional(),
+    branchSha: shaSchema.optional(),
+    startSha: shaSchema.optional(),
+    comparisonSha: shaSchema.optional(),
+    comparisonBranch: schemas_string().optional(),
     operation: schemas_enum(['validate', 'deploy', 'quick-deploy']),
     settings: validationSettingsSchema,
     payloadHash: schemas_string().regex(/^[a-f0-9]{64}$/),
     validationRecordId: schemas_number().int().positive().optional()
 })
     .strict();
-function baseline(entries, orgId) {
-    if (entries.some((entry) => entry.receipt.orgId !== orgId)) {
-        throw new Error('This org profile was previously linked to a different Salesforce org ID. Use a new profile key.');
-    }
-    return entries
-        .filter((entry) => entry.receipt.operation !== 'validate' && entry.state === 'success')
-        .sort((first, second) => second.id - first.id)[0];
-}
-function assertSettled(entries, exceptId) {
-    if (entries.some((entry) => entry.id !== exceptId &&
-        entry.receipt.operation !== 'validate' &&
-        !['success', 'failure'].includes(entry.state))) {
-        throw new Error('An actual deployment is unresolved. Reconcile its release record before starting another operation.');
-    }
-}
-function savedValidation(entries, id, current) {
+function savedValidation(entries, id) {
     const entry = entries.find((candidate) => candidate.id === id);
     if (!entry ||
         entry.receipt.operation !== 'validate' ||
@@ -44477,13 +44449,68 @@ function savedValidation(entries, id, current) {
         !entry.jobId) {
         throw new Error('Quick Deploy requires a successful recorded validation with a Salesforce job ID.');
     }
-    if (entry.receipt.baselineId !== (current?.id ?? null)) {
-        throw new Error('The org baseline changed after validation. Validate a fresh payload before Quick Deploy.');
-    }
     return entry;
 }
 function githubHistory(client, repo, org, logUrl) {
     return {
+        async get(id, kind) {
+            if (kind === 'validation') {
+                const { data } = await client.rest.checks.get({
+                    ...repo,
+                    check_run_id: id
+                });
+                const receipt = receiptSchema.parse(JSON.parse(data.output.text ?? ''));
+                if (data.name !== 'Release validation' ||
+                    receipt.org !== org ||
+                    receipt.headSha !== data.head_sha ||
+                    receipt.operation !== 'validate') {
+                    throw new Error('The validation record does not belong to this org and commit.');
+                }
+                return {
+                    id,
+                    kind,
+                    receipt,
+                    state: data.status === 'completed'
+                        ? data.conclusion === 'success'
+                            ? 'success'
+                            : 'failure'
+                        : 'in_progress',
+                    jobId: data.external_id?.startsWith('sf-job:')
+                        ? jobIdSchema.parse(data.external_id.slice(7))
+                        : undefined
+                };
+            }
+            const { data } = await client.rest.repos.getDeployment({
+                ...repo,
+                deployment_id: id
+            });
+            const receipt = receiptSchema.parse(typeof data.payload === 'string'
+                ? JSON.parse(data.payload)
+                : data.payload);
+            if (data.task !== releaseTask ||
+                receipt.org !== org ||
+                receipt.headSha !== data.sha ||
+                receipt.environment !== data.environment) {
+                throw new Error('The deployment record does not belong to this org, environment, and commit.');
+            }
+            const statuses = await client.paginate(client.rest.repos.listDeploymentStatuses, { ...repo, deployment_id: id, per_page: 100 });
+            const managed = statuses.filter((status) => status.description === 'Salesforce job ID not yet recorded' ||
+                /^sf-job:0Af[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/.test(status.description ?? ''));
+            const jobIds = [
+                ...new Set(managed
+                    .map((status) => status.description?.match(/^sf-job:(0Af[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?)$/)?.[1])
+                    .filter(Boolean))
+            ];
+            if (jobIds.length > 1)
+                throw new Error('Release history has conflicting Salesforce job IDs.');
+            return {
+                id,
+                kind,
+                receipt,
+                state: managed[0]?.state ?? 'pending',
+                jobId: jobIds[0]
+            };
+        },
         async list() {
             const deployments = await client.paginate(client.rest.repos.listDeployments, {
                 ...repo,
@@ -44538,6 +44565,26 @@ function githubHistory(client, repo, org, logUrl) {
         },
         async create(receipt) {
             receiptSchema.parse(receipt);
+            if (receipt.operation === 'validate') {
+                const response = await client.rest.checks.create({
+                    ...repo,
+                    name: 'Release validation',
+                    head_sha: receipt.headSha,
+                    status: 'in_progress',
+                    details_url: logUrl,
+                    output: {
+                        title: 'Release validation',
+                        summary: 'Validation only. No metadata deployment was committed.',
+                        text: JSON.stringify(receipt)
+                    }
+                });
+                return {
+                    id: response.data.id,
+                    kind: 'validation',
+                    receipt,
+                    state: 'in_progress'
+                };
+            }
             const response = await client.rest.repos.createDeployment({
                 ...repo,
                 ref: receipt.headSha,
@@ -44551,9 +44598,27 @@ function githubHistory(client, repo, org, logUrl) {
             });
             if (!('id' in response.data))
                 throw new Error('GitHub did not create a release history record.');
-            return { id: response.data.id, receipt, state: 'pending' };
+            return {
+                id: response.data.id,
+                kind: 'deployment',
+                receipt,
+                state: 'pending'
+            };
         },
         async status(entry, state) {
+            if (entry.kind === 'validation') {
+                await client.rest.checks.update({
+                    ...repo,
+                    check_run_id: entry.id,
+                    status: state === 'in_progress' ? 'in_progress' : 'completed',
+                    ...(state === 'in_progress' ? {} : { conclusion: state }),
+                    external_id: entry.jobId
+                        ? `sf-job:${jobIdSchema.parse(entry.jobId)}`
+                        : ''
+                });
+                entry.state = state;
+                return;
+            }
             await client.rest.repos.createDeploymentStatus({
                 ...repo,
                 deployment_id: entry.id,
@@ -44573,22 +44638,36 @@ function githubHistory(client, repo, org, logUrl) {
 
 
 
-
+function environmentOrg(orgs, environment) {
+    const selected = Object.keys(orgs.orgs).filter((org) => orgs.orgs[org].environment === environment);
+    if (selected.length !== 1)
+        throw new Error('The selected GitHub environment must map to exactly one org profile.');
+    return selected[0];
+}
+function recordReference(value, operation) {
+    const match = /^(validation|deployment):([1-9][0-9]*)$/.exec(value);
+    if (!match ||
+        !Number.isSafeInteger(Number(match[2])) ||
+        (operation === 'quick-deploy' && match[1] !== 'validation')) {
+        throw new Error('Use a saved reference such as validation:123 or deployment:456. Quick Deploy requires a validation reference.');
+    }
+    return {
+        recordKind: match[1],
+        recordId: Number(match[2])
+    };
+}
 function releasePlan(config, orgs, branch, environment, mode) {
     if (!branch.trim() || !environment.trim()) {
         throw new Error('A target branch and GitHub environment are required.');
     }
-    const selected = Object.keys(orgs.orgs).filter((org) => orgs.orgs[org].environment === environment);
-    if (selected.length !== 1) {
-        throw new Error('The selected GitHub environment must map to exactly one org profile.');
-    }
+    const org = environmentOrg(orgs, environment);
     const plan = resolveConfig(config, branch);
     const deployment = plan.branchConfig.deployment;
     if (!plan.matchedBranch ||
         !deployment ||
         deployment.enabled !== true ||
         !Array.isArray(deployment.orgs) ||
-        !deployment.orgs.includes(selected[0])) {
+        !deployment.orgs.includes(org)) {
         throw new Error('Deployment is not enabled for this branch and selected environment/org.');
     }
     const settings = validationSettingsSchema.parse({
@@ -44596,31 +44675,188 @@ function releasePlan(config, orgs, branch, environment, mode) {
         mode: mode === 'configured' ? deployment.mode : mode
     });
     return {
-        org: selected[0],
-        profile: orgConnection(orgs, selected[0]),
+        org,
+        profile: orgConnection(orgs, org),
         branch,
         environment,
         settings
     };
 }
-function releaseTarget(plan, operation, branchSha, toSha, entries, recordId) {
-    shaSchema.parse(branchSha);
-    if (operation === 'quick-deploy' || operation === 'reconcile') {
-        const entry = entries.find((candidate) => candidate.id === recordId);
-        if (!entry ||
-            entry.receipt.branch !== plan.branch ||
-            entry.receipt.environment !== plan.environment ||
-            (operation === 'quick-deploy' &&
-                (entry.receipt.operation !== 'validate' || entry.state !== 'success'))) {
-            throw new Error('Select a matching recorded validation/release for this source branch and environment.');
-        }
-        if (toSha && toSha !== entry.receipt.headSha)
-            throw new Error('The selected commit differs from the saved release.');
-        return { headSha: entry.receipt.headSha, branchSha };
+
+;// CONCATENATED MODULE: external "node:child_process"
+const external_node_child_process_namespaceObject = require("node:child_process");
+;// CONCATENATED MODULE: ./actions/deploy-metadata/src/source.ts
+
+
+
+
+
+
+function git(workspace, args) {
+    try {
+        return (0,external_node_child_process_namespaceObject.execFileSync)('git', args, {
+            cwd: workspace,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'pipe'],
+            maxBuffer: 16 * 1024 * 1024
+        });
     }
-    if (recordId)
-        throw new Error('Release record ID is only used for Quick Deploy or reconciliation.');
-    return { headSha: shaSchema.parse(toSha || branchSha), branchSha };
+    catch {
+        throw new Error('Git release check failed. Fetch complete branch history and verify commit ancestry.');
+    }
+}
+function assertAncestor(workspace, ancestor, descendant) {
+    git(workspace, [
+        'merge-base',
+        '--is-ancestor',
+        shaSchema.parse(ancestor),
+        shaSchema.parse(descendant)
+    ]);
+}
+function selectSourceRange(workspace, selection, branchSha, options = {}) {
+    shaSchema.parse(branchSha);
+    if (selection === 'full-branch') {
+        if (options.startSha || options.endSha || options.comparisonSha) {
+            throw new Error('Full Branch takes only a source branch, not commit or comparison inputs.');
+        }
+        return { selection, branchSha, headSha: branchSha };
+    }
+    if (selection === 'commit-range') {
+        if (!options.startSha || !options.endSha || options.comparisonSha) {
+            throw new Error('Commit Range requires start and end commits on the selected branch.');
+        }
+        const startSha = shaSchema.parse(options.startSha);
+        const headSha = shaSchema.parse(options.endSha);
+        assertAncestor(workspace, startSha, headSha);
+        assertAncestor(workspace, headSha, branchSha);
+        const parents = git(workspace, [
+            'rev-list',
+            '--parents',
+            '-n',
+            '1',
+            startSha
+        ])
+            .trim()
+            .split(' ');
+        return { selection, branchSha, headSha, startSha, baseSha: parents[1] };
+    }
+    if (!options.comparisonSha || options.startSha || options.endSha) {
+        throw new Error('Branch Changes requires a comparison branch, not commit inputs.');
+    }
+    const comparisonSha = shaSchema.parse(options.comparisonSha);
+    const baseSha = git(workspace, [
+        'merge-base',
+        branchSha,
+        comparisonSha
+    ]).trim();
+    return {
+        selection,
+        branchSha,
+        headSha: branchSha,
+        comparisonSha,
+        baseSha: shaSchema.parse(baseSha)
+    };
+}
+function releaseSources(workspace, headSha, branchSha, settings, baseSha, emptyBase = false) {
+    shaSchema.parse(headSha);
+    shaSchema.parse(branchSha);
+    if ((0,external_node_fs_namespaceObject.realpathSync)(workspace) !==
+        (0,external_node_fs_namespaceObject.realpathSync)(git(workspace, ['rev-parse', '--show-toplevel']).trim()) ||
+        git(workspace, ['rev-parse', 'HEAD']).trim() !== headSha ||
+        git(workspace, ['status', '--porcelain', '--untracked-files=all']).trim()) {
+        throw new Error('Release metadata must be a clean project-root checkout of the pinned source commit.');
+    }
+    assertAncestor(workspace, headSha, branchSha);
+    if (baseSha)
+        assertAncestor(workspace, baseSha, headSha);
+    if (!baseSha && settings.mode === 'delta' && !emptyBase) {
+        throw new Error('Delta selection requires an explicit comparison base or a range starting at the root commit.');
+    }
+    const project = JSON.parse((0,external_node_fs_namespaceObject.readFileSync)(external_node_path_default().join(workspace, 'sfdx-project.json'), 'utf8'));
+    const directories = sourcePaths({ ...settings, mode: 'full' }, project, []);
+    const inScope = (filename) => directories.some((directory) => directory === '.' ||
+        filename === directory ||
+        filename.startsWith(directory + '/'));
+    const changes = [];
+    if (emptyBase) {
+        for (const filename of git(workspace, [
+            'ls-tree',
+            '-r',
+            '--name-only',
+            '-z',
+            headSha
+        ])
+            .split('\0')
+            .filter(Boolean)) {
+            changes.push({ filename, status: 'added' });
+        }
+    }
+    if (baseSha) {
+        const fields = git(workspace, [
+            'diff',
+            '--name-status',
+            '-z',
+            '--no-renames',
+            shaSchema.parse(baseSha),
+            headSha,
+            '--'
+        ]).split('\0');
+        for (let index = 0; index + 1 < fields.length; index += 2) {
+            const status = fields[index];
+            const filename = fields[index + 1];
+            if (status === 'D' && inScope(filename)) {
+                throw new Error('Metadata removals/renames require destructive deployment support, which is not enabled.');
+            }
+            if (settings.mode === 'delta' &&
+                ['sfdx-project.json', '.forceignore'].includes(filename)) {
+                throw new Error('Project configuration or .forceignore changed. Select full mode.');
+            }
+            changes.push({
+                filename,
+                status: status === 'D' ? 'removed' : 'modified'
+            });
+        }
+    }
+    const sources = sourcePaths(settings, project, changes);
+    const checkPath = (relative) => {
+        const absolute = external_node_path_default().resolve(workspace, relative);
+        if (absolute !== workspace && !absolute.startsWith(workspace + (external_node_path_default()).sep)) {
+            throw new Error('Release source paths must remain inside the project.');
+        }
+        const stat = (0,external_node_fs_namespaceObject.lstatSync)(absolute);
+        if (stat.isSymbolicLink())
+            throw new Error('Release source/configuration symlinks are not allowed.');
+        if (stat.isDirectory()) {
+            for (const child of (0,external_node_fs_namespaceObject.readdirSync)(absolute)) {
+                if (child !== '.git')
+                    checkPath(external_node_path_default().join(relative, child));
+            }
+        }
+    };
+    checkPath('sfdx-project.json');
+    try {
+        (0,external_node_fs_namespaceObject.lstatSync)(external_node_path_default().join(workspace, '.forceignore'));
+        checkPath('.forceignore');
+    }
+    catch (error) {
+        if (error.code !== 'ENOENT')
+            throw error;
+    }
+    for (const source of sources) {
+        let parent = source;
+        while (parent !== '.' && parent !== external_node_path_default().dirname(parent)) {
+            if ((0,external_node_fs_namespaceObject.lstatSync)(external_node_path_default().join(workspace, parent)).isSymbolicLink())
+                throw new Error('Release source symlinks are not allowed.');
+            parent = external_node_path_default().dirname(parent);
+        }
+        checkPath(source);
+    }
+    return {
+        sources,
+        payloadHash: (0,external_node_crypto_.createHash)('sha256')
+            .update(JSON.stringify({ headSha, settings, sources }))
+            .digest('hex')
+    };
 }
 
 ;// CONCATENATED MODULE: external "node:os"
@@ -44708,125 +44944,6 @@ async function withJwtOrg(options, operation) {
     finally {
         (0,external_node_fs_namespaceObject.rmSync)(authDirectory, { recursive: true, force: true });
     }
-}
-
-;// CONCATENATED MODULE: external "node:child_process"
-const external_node_child_process_namespaceObject = require("node:child_process");
-;// CONCATENATED MODULE: ./actions/deploy-metadata/src/source.ts
-
-
-
-
-
-
-function git(workspace, args) {
-    try {
-        return (0,external_node_child_process_namespaceObject.execFileSync)('git', args, {
-            cwd: workspace,
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'pipe'],
-            maxBuffer: 16 * 1024 * 1024
-        });
-    }
-    catch {
-        throw new Error('Git release check failed. Fetch complete branch history and verify commit ancestry.');
-    }
-}
-function assertAncestor(workspace, ancestor, descendant) {
-    git(workspace, [
-        'merge-base',
-        '--is-ancestor',
-        shaSchema.parse(ancestor),
-        shaSchema.parse(descendant)
-    ]);
-}
-function releaseSources(workspace, headSha, branchSha, settings, baseSha) {
-    shaSchema.parse(headSha);
-    shaSchema.parse(branchSha);
-    if ((0,external_node_fs_namespaceObject.realpathSync)(workspace) !==
-        (0,external_node_fs_namespaceObject.realpathSync)(git(workspace, ['rev-parse', '--show-toplevel']).trim()) ||
-        git(workspace, ['rev-parse', 'HEAD']).trim() !== headSha ||
-        git(workspace, ['status', '--porcelain', '--untracked-files=all']).trim()) {
-        throw new Error('Release metadata must be a clean project-root checkout of the pinned source commit.');
-    }
-    assertAncestor(workspace, headSha, branchSha);
-    if (baseSha)
-        assertAncestor(workspace, baseSha, headSha);
-    if (!baseSha && settings.mode === 'delta') {
-        throw new Error('No successful actual deployment baseline exists. Bootstrap this org with a full deployment.');
-    }
-    const project = JSON.parse((0,external_node_fs_namespaceObject.readFileSync)(external_node_path_default().join(workspace, 'sfdx-project.json'), 'utf8'));
-    const directories = sourcePaths({ ...settings, mode: 'full' }, project, []);
-    const inScope = (filename) => directories.some((directory) => directory === '.' ||
-        filename === directory ||
-        filename.startsWith(directory + '/'));
-    const changes = [];
-    if (baseSha) {
-        const fields = git(workspace, [
-            'diff',
-            '--name-status',
-            '-z',
-            '--no-renames',
-            shaSchema.parse(baseSha),
-            headSha,
-            '--'
-        ]).split('\0');
-        for (let index = 0; index + 1 < fields.length; index += 2) {
-            const status = fields[index];
-            const filename = fields[index + 1];
-            if (status === 'D' && inScope(filename)) {
-                throw new Error('Metadata removals/renames require destructive deployment support, which is not enabled.');
-            }
-            if (settings.mode === 'delta' &&
-                ['sfdx-project.json', '.forceignore'].includes(filename)) {
-                throw new Error('Project configuration or .forceignore changed. Select full mode.');
-            }
-            changes.push({
-                filename,
-                status: status === 'D' ? 'removed' : 'modified'
-            });
-        }
-    }
-    const sources = sourcePaths(settings, project, changes);
-    const checkPath = (relative) => {
-        const absolute = external_node_path_default().resolve(workspace, relative);
-        if (absolute !== workspace && !absolute.startsWith(workspace + (external_node_path_default()).sep)) {
-            throw new Error('Release source paths must remain inside the project.');
-        }
-        const stat = (0,external_node_fs_namespaceObject.lstatSync)(absolute);
-        if (stat.isSymbolicLink())
-            throw new Error('Release source/configuration symlinks are not allowed.');
-        if (stat.isDirectory()) {
-            for (const child of (0,external_node_fs_namespaceObject.readdirSync)(absolute)) {
-                if (child !== '.git')
-                    checkPath(external_node_path_default().join(relative, child));
-            }
-        }
-    };
-    checkPath('sfdx-project.json');
-    try {
-        (0,external_node_fs_namespaceObject.lstatSync)(external_node_path_default().join(workspace, '.forceignore'));
-        checkPath('.forceignore');
-    }
-    catch (error) {
-        if (error.code !== 'ENOENT')
-            throw error;
-    }
-    for (const source of sources) {
-        let parent = source;
-        while (parent !== '.' && parent !== external_node_path_default().dirname(parent)) {
-            if ((0,external_node_fs_namespaceObject.lstatSync)(external_node_path_default().join(workspace, parent)).isSymbolicLink())
-                throw new Error('Release source symlinks are not allowed.');
-            parent = external_node_path_default().dirname(parent);
-        }
-        checkPath(source);
-    }
-    return {
-        sources,
-        payloadHash: (0,external_node_crypto_.createHash)('sha256')
-            .update(JSON.stringify({ headSha, settings, sources }))
-            .digest('hex')
-    };
 }
 
 ;// CONCATENATED MODULE: ./shared/org-api.ts
@@ -44921,9 +45038,30 @@ function deploymentReport(response, jobId, checkOnly) {
 async function runRelease(options) {
     return withJwtOrg(options, async ({ alias, run }) => {
         const { orgId } = await verifyOrgApi({ alias, run });
-        const entries = await options.history.list();
-        const current = baseline(entries, orgId);
         const plan = options.plan;
+        const auditStatus = async (entry, state) => {
+            if (!entry.id)
+                return;
+            try {
+                await options.history.status(entry, state);
+            }
+            catch {
+                options.onAuditWarning?.('Unable to update the audit record. Salesforce outcome and submitted job ID remain authoritative.');
+            }
+        };
+        const selectedRecord = async (kind) => {
+            if (!options.recordId)
+                throw new Error('A saved validation/deployment reference is required.');
+            const entry = await options.history.get(options.recordId, kind);
+            if (entry.receipt.orgId !== orgId ||
+                entry.receipt.org !== plan.org ||
+                entry.receipt.environment !== plan.environment ||
+                entry.receipt.branch !== plan.branch ||
+                entry.receipt.headSha !== options.headSha) {
+                throw new Error('Saved release identity does not match the authenticated org, environment, branch, and commit.');
+            }
+            return entry;
+        };
         const readReport = async (entry) => {
             if (!entry.jobId)
                 throw new Error('This release has no recorded Salesforce job ID. Inspect Salesforce and GitHub history manually; do not submit a duplicate.');
@@ -44950,36 +45088,24 @@ async function runRelease(options) {
             options.onRecord?.(entry);
             const result = await readReport(entry);
             if (result.succeeded) {
-                await options.history.status(entry, 'success');
+                await auditStatus(entry, 'success');
                 return { outcome: 'Succeeded', entry };
             }
             if (result.failed) {
-                await options.history.status(entry, 'failure');
+                await auditStatus(entry, 'failure');
                 throw new Error('Salesforce deployment/validation failed or was canceled. See the sanitized report.');
             }
             throw new Error('Salesforce has not confirmed complete success. Reconcile this release record; do not resubmit it.');
         };
         if (options.operation === 'reconcile') {
-            const entry = entries.find((candidate) => candidate.id === options.recordId);
-            if (!entry ||
-                entry.receipt.branch !== plan.branch ||
-                entry.receipt.environment !== plan.environment ||
-                entry.receipt.headSha !== options.headSha) {
-                throw new Error('Reconciliation requires an existing release record for this branch and pinned commit.');
-            }
-            assertSettled(entries, entry.id);
-            if (entry.receipt.operation !== 'validate' &&
-                entry.id !== current?.id &&
-                entry.receipt.baselineId !== (current?.id ?? null)) {
-                throw new Error('A later deployment changed the baseline. This older record cannot advance it.');
-            }
+            const entry = await selectedRecord(options.recordKind ?? 'deployment');
             return finish(entry);
         }
-        assertSettled(entries);
         let receipt;
         let args;
         if (options.operation === 'quick-deploy') {
-            const validation = savedValidation(entries, options.recordId ?? 0, current);
+            const selected = await selectedRecord('validation');
+            const validation = savedValidation([selected], selected.id);
             if (validation.receipt.branch !== plan.branch ||
                 validation.receipt.environment !== plan.environment ||
                 validation.receipt.headSha !== options.headSha ||
@@ -44991,8 +45117,6 @@ async function runRelease(options) {
                 throw new Error('Quick Deploy branch, commit, or deployment policy differs from the saved validation.');
             }
             assertAncestor(options.workspace, options.headSha, options.branchSha);
-            if (current)
-                assertAncestor(options.workspace, current.receipt.headSha, options.headSha);
             if (!(await readReport(validation)).succeeded)
                 throw new Error('The recorded validation is no longer confirmed successful.');
             receipt = {
@@ -45013,13 +45137,21 @@ async function runRelease(options) {
             ];
         }
         else {
-            if (current &&
-                plan.settings.mode === 'delta' &&
-                JSON.stringify(plan.settings.sourceDirs) !==
-                    JSON.stringify(current.receipt.settings.sourceDirs)) {
-                throw new Error('Configured source directories changed since the baseline. Select full mode.');
+            const requested = options.range ??
+                selectSourceRange(options.workspace, 'full-branch', options.branchSha);
+            const range = selectSourceRange(options.workspace, requested.selection, options.branchSha, {
+                startSha: requested.startSha,
+                endSha: requested.selection === 'commit-range'
+                    ? requested.headSha
+                    : undefined,
+                comparisonSha: requested.comparisonSha
+            });
+            if (range.headSha !== options.headSha ||
+                plan.settings.mode !==
+                    (range.selection === 'full-branch' ? 'full' : 'delta')) {
+                throw new Error('Pinned source selection does not match the release payload mode and commit.');
             }
-            const payload = releaseSources(options.workspace, options.headSha, options.branchSha, plan.settings, current?.receipt.headSha);
+            const payload = releaseSources(options.workspace, options.headSha, options.branchSha, plan.settings, range.baseSha, range.selection === 'commit-range' && !range.baseSha);
             if (!payload.sources.length)
                 return { outcome: 'Skipped' };
             receipt = {
@@ -45029,9 +45161,7 @@ async function runRelease(options) {
                 orgId,
                 environment: plan.environment,
                 branch: plan.branch,
-                headSha: options.headSha,
-                baseSha: current?.receipt.headSha,
-                baselineId: current?.id ?? null,
+                ...range,
                 operation: options.operation,
                 settings: plan.settings,
                 payloadHash: payload.payloadHash
@@ -45042,9 +45172,21 @@ async function runRelease(options) {
                 args.splice(args.indexOf('--dry-run'), 1);
             args.push('--async');
         }
-        const entry = await options.history.create(receipt);
+        let entry;
+        try {
+            entry = await options.history.create(receipt);
+        }
+        catch {
+            options.onAuditWarning?.('Unable to create the audit record. Continuing with the explicitly selected payload; preserve the Salesforce job ID/report for recovery.');
+            entry = {
+                id: 0,
+                kind: receipt.operation === 'validate' ? 'validation' : 'deployment',
+                receipt,
+                state: 'in_progress'
+            };
+        }
         options.onRecord?.(entry);
-        await options.history.status(entry, 'in_progress');
+        await auditStatus(entry, 'in_progress');
         const response = await run(args);
         const submitted = run_json(response);
         options.onReport?.(redactReport(submitted, [
@@ -45056,23 +45198,23 @@ async function runRelease(options) {
         if (!result.success) {
             if (submitted.name === 'NothingToDeploy' ||
                 submitted.code === 'NothingToDeploy') {
-                await options.history.status(entry, 'failure');
+                await auditStatus(entry, 'failure');
                 return { outcome: 'Skipped', entry };
             }
             if (response.exitCode !== 0 &&
                 ['INVALID_OPERATION', 'INVALID_ID_FIELD'].includes(String(submitted.name))) {
-                await options.history.status(entry, 'failure');
+                await auditStatus(entry, 'failure');
                 throw new Error('Salesforce rejected the request. Quick Deploy eligibility is not guaranteed; choose a normal Deploy explicitly if appropriate.');
             }
             throw new Error('Salesforce did not return a deployment job ID. Submission is unresolved; inspect the org before retrying.');
         }
         entry.jobId = result.data.id;
-        await options.history.status(entry, 'in_progress');
+        await auditStatus(entry, 'in_progress');
         return finish(entry);
     });
 }
 
-;// CONCATENATED MODULE: ./actions/deploy-metadata/src/index.ts
+;// CONCATENATED MODULE: ./actions/deploy-metadata/src/action.ts
 
 
 
@@ -45083,77 +45225,169 @@ async function runRelease(options) {
 
 
 
+
+const action_operationSchema = schemas_enum([
+    'validate',
+    'deploy',
+    'quick-deploy',
+    'reconcile'
+]);
+const selectionSchema = schemas_enum([
+    'full-branch',
+    'commit-range',
+    'branch-changes'
+]);
+const rangeSchema = object({
+    selection: selectionSchema,
+    branchSha: shaSchema,
+    headSha: shaSchema,
+    baseSha: shaSchema.optional(),
+    startSha: shaSchema.optional(),
+    comparisonSha: shaSchema.optional()
+})
+    .strict();
+const preparedSchema = object({
+    branch: schemas_string().min(1),
+    environment: schemas_string().min(1),
+    operation: action_operationSchema,
+    range: rangeSchema,
+    comparisonBranch: schemas_string().optional(),
+    recordId: schemas_number().int().positive().safe().optional(),
+    recordKind: schemas_enum(['validation', 'deployment']).optional()
+})
+    .strict();
 function display(value) {
     return value
         .replaceAll('&', '&amp;')
         .replaceAll('<', '&lt;')
         .replaceAll('>', '&gt;');
 }
-async function run() {
-    let releaseRecordId = '';
+async function runReleaseAction(fixed = {}) {
+    let reference = '';
     let deploymentId = '';
     try {
         if (process.env.GITHUB_EVENT_NAME !== 'workflow_dispatch')
-            throw new Error('Metadata releases require a manually dispatched workflow.');
-        const operation = schemas_enum(['validate', 'deploy', 'quick-deploy', 'reconcile'])
-            .parse(getInput('operation'));
+            throw new Error('Releases require a manually dispatched workflow.');
+        const operation = fixed.operation ??
+            action_operationSchema.parse(getInput('operation') || 'validate');
+        if (fixed.selection && !['validate', 'deploy'].includes(operation))
+            throw new Error('Source-selection actions support only validate or deploy.');
+        if (['quick-deploy', 'reconcile'].includes(operation) &&
+            getInput('selection'))
+            throw new Error('Saved-job utilities do not accept a new source selection.');
         const config = readConfig(getInput('config', { required: true }));
         const orgs = readOrgsConfig(getInput('orgs-config', { required: true }));
-        const plan = releasePlan(config, orgs, getInput('source-branch', { required: true }), getInput('environment', { required: true }), getInput('mode'));
-        const recordInput = getInput('release-record-id');
-        const recordId = recordInput
-            ? coerce_number().int().positive().safe().parse(recordInput)
-            : undefined;
+        const environment = getInput('environment', { required: true });
+        const org = environmentOrg(orgs, environment);
+        const workspace = (0,external_node_fs_namespaceObject.realpathSync)(external_node_path_default().resolve(process.env.GITHUB_WORKSPACE ?? process.cwd(), getInput('working-directory') || '.'));
         const { getOctokit, context } = await __nccwpck_require__.e(/* import() */ 413).then(__nccwpck_require__.bind(__nccwpck_require__, 2413));
         const client = getOctokit(getInput('github-token', { required: true }));
         const logUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-        const history = githubHistory(client, context.repo, plan.org, logUrl);
-        if (getBooleanInput('prepare-only')) {
-            const branch = await client.rest.repos.getBranch({
-                ...context.repo,
-                branch: plan.branch
-            });
-            const entries = operation === 'quick-deploy' || operation === 'reconcile'
-                ? await history.list()
-                : [];
-            const target = releaseTarget(plan, operation, branch.data.commit.sha, getInput('to-sha'), entries, recordId);
-            if (target.headSha !== target.branchSha) {
-                const comparison = await client.rest.repos.compareCommitsWithBasehead({
-                    ...context.repo,
-                    basehead: `${target.headSha}...${target.branchSha}`
-                });
-                if (!['ahead', 'identical'].includes(comparison.data.status)) {
-                    throw new Error('The selected commit is not an ancestor of the selected source branch.');
+        const history = githubHistory(client, context.repo, org, logUrl);
+        const prepareOnly = fixed.prepare ??
+            (getInput('prepare-only')
+                ? getBooleanInput('prepare-only')
+                : false);
+        if (prepareOnly) {
+            let branch = getInput('source-branch');
+            let prepared;
+            let saved;
+            if (operation === 'quick-deploy' || operation === 'reconcile') {
+                const selected = recordReference(getInput('release-record-id', { required: true }), operation);
+                saved = await history.get(selected.recordId, selected.recordKind);
+                if (saved.receipt.environment !== environment ||
+                    (operation === 'quick-deploy' && saved.state !== 'success')) {
+                    throw new Error('Select a successful validation for this environment, or an existing job to reconcile.');
                 }
+                branch = saved.receipt.branch;
+                prepared = {
+                    branch,
+                    environment,
+                    operation,
+                    ...selected,
+                    range: {
+                        selection: saved.receipt.selection ??
+                            (saved.receipt.settings.mode === 'full'
+                                ? 'full-branch'
+                                : 'commit-range'),
+                        headSha: saved.receipt.headSha,
+                        branchSha: saved.receipt.branchSha ?? saved.receipt.headSha,
+                        baseSha: saved.receipt.baseSha,
+                        startSha: saved.receipt.startSha,
+                        comparisonSha: saved.receipt.comparisonSha
+                    }
+                };
             }
+            else {
+                if (!branch)
+                    throw new Error('A source branch is required.');
+                if (getInput('release-record-id') || getInput('to-sha'))
+                    throw new Error('Source selection does not accept saved records or a separate target commit.');
+                const selection = fixed.selection ?? selectionSchema.parse(getInput('selection'));
+                const tip = await client.rest.repos.getBranch({
+                    ...context.repo,
+                    branch
+                });
+                const comparisonBranch = getInput('comparison-branch');
+                if ((selection === 'branch-changes') !== Boolean(comparisonBranch))
+                    throw new Error('Only Branch Changes requires a comparison branch.');
+                const comparison = comparisonBranch
+                    ? await client.rest.repos.getBranch({
+                        ...context.repo,
+                        branch: comparisonBranch
+                    })
+                    : undefined;
+                const range = selectSourceRange(workspace, selection, tip.data.commit.sha, {
+                    startSha: getInput('start-commit') || undefined,
+                    endSha: getInput('end-commit') || undefined,
+                    comparisonSha: comparison?.data.commit.sha
+                });
+                prepared = {
+                    branch,
+                    environment,
+                    operation,
+                    range,
+                    ...(comparisonBranch ? { comparisonBranch } : {})
+                };
+            }
+            preparedSchema.parse(prepared);
+            const plan = releasePlan(config, orgs, branch, environment, saved?.receipt.settings.mode ??
+                (prepared.range.selection === 'full-branch' ? 'full' : 'delta'));
             setOutput('config', JSON.stringify(config));
             setOutput('orgs-config', JSON.stringify(orgs));
-            setOutput('profile', JSON.stringify({ org: plan.org, ...plan.profile }));
-            setOutput('head-sha', target.headSha);
-            setOutput('branch-sha', target.branchSha);
+            setOutput('profile', JSON.stringify({ org, ...plan.profile }));
+            setOutput('plan', JSON.stringify(prepared));
+            setOutput('head-sha', prepared.range.headSha);
+            setOutput('branch-sha', prepared.range.branchSha);
             await summary
-                .addHeading('Manual Salesforce release plan')
+                .addHeading('Release plan')
                 .addTable([
                 [
-                    { data: 'Source branch', header: true },
-                    { data: 'Pinned commit', header: true },
+                    { data: 'Branch', header: true },
+                    { data: 'Commit', header: true },
                     { data: 'Environment', header: true },
+                    { data: 'Selection', header: true },
                     { data: 'Operation', header: true }
                 ],
                 [
-                    display(plan.branch),
-                    target.headSha,
-                    display(plan.environment),
+                    display(branch),
+                    prepared.range.headSha,
+                    display(environment),
+                    prepared.range.selection,
                     operation
                 ]
             ])
-                .addRaw('Preparation only. No Salesforce authentication or metadata operation was performed.')
+                .addRaw('Pinned inputs only. No credentials were used and no Salesforce operation was submitted. History does not select the payload.')
                 .write();
             return;
         }
-        const headSha = shaSchema.parse(getInput('head-sha', { required: true }));
-        const branchSha = shaSchema.parse(getInput('branch-sha', { required: true }));
-        const workspace = (0,external_node_fs_namespaceObject.realpathSync)(external_node_path_default().resolve(process.env.GITHUB_WORKSPACE ?? process.cwd(), getInput('working-directory')));
+        const prepared = preparedSchema.parse(JSON.parse(getInput('plan', { required: true })));
+        if (prepared.operation !== operation ||
+            prepared.environment !== environment ||
+            (fixed.selection && fixed.selection !== prepared.range.selection)) {
+            throw new Error('The prepared plan does not match this action, operation, and environment.');
+        }
+        const plan = releasePlan(config, orgs, prepared.branch, environment, prepared.range.selection === 'full-branch' ? 'full' : 'delta');
         const username = getInput('username');
         const clientId = getInput('client-id');
         const jwtPrivateKey = getInput('jwt-private-key', {
@@ -45162,8 +45396,7 @@ async function run() {
         for (const secret of [username, clientId, jwtPrivateKey])
             if (secret)
                 core_setSecret(secret);
-        const artifactName = 'sf-release-' +
-            (0,external_node_crypto_.createHash)('sha256').update(plan.org).digest('hex').slice(0, 12);
+        const artifactName = 'release-' + (0,external_node_crypto_.createHash)('sha256').update(org).digest('hex').slice(0, 12);
         const reportPath = external_node_path_default().join(process.env.RUNNER_TEMP ?? workspace, artifactName + '.json');
         setOutput('artifact-name', artifactName);
         setOutput('outcome', 'Failed');
@@ -45176,15 +45409,20 @@ async function run() {
             plan,
             operation,
             history,
-            headSha,
-            branchSha,
-            recordId,
+            headSha: prepared.range.headSha,
+            branchSha: prepared.range.branchSha,
+            range: prepared.range,
+            recordId: prepared.recordId,
+            recordKind: prepared.recordKind,
+            onAuditWarning: warning,
             onRecord(entry) {
-                releaseRecordId = String(entry.id);
+                reference = entry.id
+                    ? `${entry.kind ?? (entry.receipt.operation === 'validate' ? 'validation' : 'deployment')}:${entry.id}`
+                    : '';
                 deploymentId = entry.jobId ?? '';
-                info(`GitHub release record ID: ${releaseRecordId}; Salesforce job ID: ${deploymentId || '(not recorded yet)'}`);
-                setOutput('release-record-id', entry.id);
-                setOutput('deployment-id', entry.jobId ?? '');
+                setOutput('release-record-id', reference);
+                setOutput('deployment-id', deploymentId);
+                info(`Saved reference: ${reference || '(audit unavailable)'}; Salesforce job ID: ${deploymentId || '(not submitted yet)'}`);
             },
             onReport(report) {
                 (0,external_node_fs_namespaceObject.writeFileSync)(reportPath, JSON.stringify(report, null, 2), {
@@ -45195,43 +45433,43 @@ async function run() {
         });
         setOutput('outcome', result.outcome);
         await summary
-            .addHeading('Manual Salesforce release result')
+            .addHeading('Release result')
             .addTable([
             [
                 { data: 'Branch', header: true },
                 { data: 'Commit', header: true },
                 { data: 'Operation', header: true },
                 { data: 'Result', header: true },
-                { data: 'Release record ID', header: true },
+                { data: 'Saved reference', header: true },
                 { data: 'Salesforce job ID', header: true }
             ],
             [
-                display(plan.branch),
-                headSha,
+                display(prepared.branch),
+                prepared.range.headSha,
                 operation,
                 result.outcome,
-                String(result.entry?.id ?? ''),
-                result.entry?.jobId ?? ''
+                reference,
+                deploymentId
             ]
         ])
             .addRaw(operation === 'validate'
-            ? 'Validation only. The actual deployment baseline was not advanced.'
-            : 'Only a completed, successful actual deployment advances the org baseline.')
+            ? 'Validation only. No actual deployment record was created.'
+            : 'Recorded for audit only. No future payload or commit range is chosen from this history.')
             .write();
     }
     catch (error) {
-        setFailed(error instanceof Error ? error.message : 'Salesforce release failed.');
+        setFailed(error instanceof Error ? error.message : 'Release failed.');
         try {
             await summary
-                .addHeading('Salesforce release failed')
+                .addHeading('Release failed')
                 .addTable([
                 [
-                    { data: 'Release record ID', header: true },
+                    { data: 'Saved reference', header: true },
                     { data: 'Salesforce job ID', header: true }
                 ],
-                [releaseRecordId, deploymentId]
+                [reference, deploymentId]
             ])
-                .addRaw('Review the step error and available sanitized report. No success is assumed from a timeout. Use the release record ID for reconciliation.')
+                .addRaw('Inspect the sanitized report. A timeout is not success; report the existing job before submitting another operation.')
                 .write();
         }
         catch {
@@ -45239,7 +45477,10 @@ async function run() {
         }
     }
 }
-void run();
+
+;// CONCATENATED MODULE: ./actions/deploy-metadata/src/index.ts
+
+void runReleaseAction();
 
 })();
 

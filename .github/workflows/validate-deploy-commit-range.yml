@@ -1,0 +1,45 @@
+name: Validate or Deploy Commit Range
+run-name: ${{ inputs.operation == 'deploy' && 'Deploy' || 'Validate' }} Commit Range | ${{ inputs.source-branch }} | ${{ inputs.environment }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-branch:
+        description: Branch containing both selected commits
+        type: string
+        required: true
+        default: develop
+      start-commit:
+        description: Full SHA of the first included commit
+        type: string
+        required: true
+      end-commit:
+        description: Full SHA of the last included commit
+        type: string
+        required: true
+      environment:
+        description: Target org environment
+        type: environment
+        required: true
+      operation:
+        description: Validate only or deploy metadata
+        type: choice
+        required: true
+        default: validate
+        options: [validate, deploy]
+
+permissions:
+  contents: read
+  checks: write
+  deployments: write
+
+jobs:
+  release:
+    uses: ./.github/workflows/release-execution.yml
+    with:
+      selection: commit-range
+      source-branch: ${{ inputs.source-branch }}
+      start-commit: ${{ inputs.start-commit }}
+      end-commit: ${{ inputs.end-commit }}
+      environment: ${{ inputs.environment }}
+      operation: ${{ inputs.operation }}

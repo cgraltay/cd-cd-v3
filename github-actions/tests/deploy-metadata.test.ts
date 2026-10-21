@@ -3,17 +3,16 @@ import { test } from 'node:test';
 import { readOrgsConfig } from '../shared/orgs';
 import {
   releasePlan,
-  releaseTarget
+  recordReference
 } from '../actions/deploy-metadata/src/plan';
 import {
-  assertSettled,
-  baseline,
   savedValidation,
   githubHistory,
   releaseTask,
   type ReleaseEntry
 } from '../actions/deploy-metadata/src/history';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import {
   mkdtempSync,
   mkdirSync,
@@ -23,7 +22,10 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { releaseSources } from '../actions/deploy-metadata/src/source';
+import {
+  releaseSources,
+  selectSourceRange
+} from '../actions/deploy-metadata/src/source';
 import {
   deploymentReport,
   runRelease
@@ -90,6 +92,25 @@ test('manual release environment resolves one allowed org and configured deploym
     releasePlan(config, profiles, 'develop', 'salesforce-qa', 'full').settings
       .mode,
     'full'
+  );
+});
+
+test('saved references distinguish validation checks from deployment audits without extra form inputs', () => {
+  assert.deepEqual(recordReference('validation:123', 'quick-deploy'), {
+    recordKind: 'validation',
+    recordId: 123
+  });
+  assert.deepEqual(recordReference('deployment:456', 'reconcile'), {
+    recordKind: 'deployment',
+    recordId: 456
+  });
+  assert.throws(
+    () => recordReference('deployment:123', 'quick-deploy'),
+    /validation reference/
+  );
+  assert.throws(
+    () => recordReference('0Af000000000001AAA', 'reconcile'),
+    /saved reference/
   );
 });
 
@@ -202,91 +223,21 @@ function entry(
   };
 }
 
-test('only successful actual releases advance baseline, with org identity protection', () => {
-  const entries = [
-    entry(1),
-    entry(2, 'validate'),
-    entry(3, 'deploy', 'failure')
-  ];
-  assert.equal(baseline(entries, orgId)?.id, 1);
-  assert.equal(baseline([entry(2, 'validate')], orgId), undefined);
-  assert.throws(
-    () => baseline(entries, '00D000000000002AAA'),
-    /different Salesforce org/
-  );
-  assert.throws(
-    () => assertSettled([...entries, entry(4, 'deploy', 'in_progress')]),
-    /unresolved/
-  );
-  assert.doesNotThrow(() =>
-    assertSettled([entry(1, 'validate', 'in_progress')])
-  );
-  assert.doesNotThrow(() =>
-    assertSettled([entry(4, 'deploy', 'in_progress')], 4)
-  );
-});
-
-test('quick deployment requires a saved successful validation against the current baseline', () => {
+test('quick deployment requires a saved successful validation, not a last-deployment baseline', () => {
   const validation = entry(2, 'validate');
-  assert.equal(savedValidation([validation], 2, undefined), validation);
+  assert.equal(savedValidation([validation, entry(3)], 2), validation);
   assert.throws(
-    () => savedValidation([validation], 2, entry(3)),
-    /baseline changed/
-  );
-  assert.throws(
-    () => savedValidation([entry(2, 'validate', 'failure')], 2, undefined),
+    () => savedValidation([entry(2, 'validate', 'failure')], 2),
     /successful recorded validation/
   );
   assert.throws(
-    () => savedValidation([entry(2)], 2, undefined),
+    () => savedValidation([entry(2)], 2),
     /successful recorded validation/
   );
   assert.throws(
-    () => savedValidation([{ ...validation, jobId: undefined }], 2, undefined),
+    () => savedValidation([{ ...validation, jobId: undefined }], 2),
     /job ID/
   );
-});
-
-test('preparation pins source branch tip or explicit commit and reuses the saved validation commit', () => {
-  const releaseConfig = {
-    version: 1,
-    branches: {
-      'release-*': {
-        deployment: { enabled: true, mode: 'full', orgs: ['production'] }
-      }
-    }
-  };
-  const plan = releasePlan(
-    releaseConfig,
-    profiles,
-    'release-x',
-    'production',
-    'configured'
-  );
-  const tip = 'c'.repeat(40);
-  const validation = entry(1, 'validate');
-  assert.equal(releaseTarget(plan, 'validate', tip, '', []).headSha, tip);
-  assert.equal(
-    releaseTarget(plan, 'validate', tip, 'a'.repeat(40), []).headSha,
-    'a'.repeat(40)
-  );
-  assert.equal(
-    releaseTarget(plan, 'quick-deploy', tip, '', [validation], 1).headSha,
-    validation.receipt.headSha
-  );
-  assert.throws(
-    () => releaseTarget(plan, 'quick-deploy', tip, tip, [validation], 1),
-    /differs/
-  );
-  assert.throws(
-    () => releaseTarget(plan, 'quick-deploy', tip, '', [], 1),
-    /matching/
-  );
-  assert.throws(
-    () => releaseTarget(plan, 'deploy', tip, '', [], 1),
-    /only used/
-  );
-  assert.throws(() => releaseTarget(plan, 'validate', tip, 'HEAD', []));
 });
 
 function repository() {
@@ -317,7 +268,114 @@ function repository() {
   return { workspace, git, commit, base: commit() };
 }
 
-test('cumulative delta includes multiple commits and requires a real baseline', (context) => {
+test('explicit source ranges pin full branches, include both commit endpoints, and use branch merge bases', (context) => {
+  const repo = repository();
+  context.after(() => rmSync(repo.workspace, { recursive: true, force: true }));
+  writeFileSync(
+    path.join(repo.workspace, 'force-app/classes/Second.cls'),
+    'public class Second {}'
+  );
+  const start = repo.commit();
+  writeFileSync(
+    path.join(repo.workspace, 'force-app/classes/Third.cls'),
+    'public class Third {}'
+  );
+  const end = repo.commit();
+  assert.deepEqual(selectSourceRange(repo.workspace, 'full-branch', end), {
+    selection: 'full-branch',
+    branchSha: end,
+    headSha: end
+  });
+  const range = selectSourceRange(repo.workspace, 'commit-range', end, {
+    startSha: start,
+    endSha: end
+  });
+  assert.equal(range.baseSha, repo.base);
+  assert.deepEqual(
+    releaseSources(
+      repo.workspace,
+      end,
+      end,
+      releasePlan(config, profiles, 'develop', 'salesforce-qa', 'delta')
+        .settings,
+      range.baseSha
+    ).sources,
+    ['force-app/classes/Second.cls', 'force-app/classes/Third.cls']
+  );
+  assert.equal(
+    selectSourceRange(repo.workspace, 'commit-range', end, {
+      startSha: repo.base,
+      endSha: end
+    }).baseSha,
+    undefined
+  );
+  assert.deepEqual(
+    releaseSources(
+      repo.workspace,
+      end,
+      end,
+      releasePlan(config, profiles, 'develop', 'salesforce-qa', 'delta')
+        .settings,
+      undefined,
+      true
+    ).sources,
+    [
+      'force-app/classes/First.cls',
+      'force-app/classes/Second.cls',
+      'force-app/classes/Third.cls'
+    ]
+  );
+  repo.git('checkout', '-b', 'comparison', repo.base);
+  writeFileSync(
+    path.join(repo.workspace, 'force-app/classes/OnlyComparison.cls'),
+    'public class OnlyComparison {}'
+  );
+  const comparisonSha = repo.commit();
+  const comparison = selectSourceRange(repo.workspace, 'branch-changes', end, {
+    comparisonSha
+  });
+  assert.equal(comparison.baseSha, repo.base);
+  assert.equal(comparison.headSha, end);
+  repo.git('checkout', 'release-x');
+  assert.deepEqual(
+    releaseSources(
+      repo.workspace,
+      end,
+      end,
+      releasePlan(config, profiles, 'develop', 'salesforce-qa', 'delta')
+        .settings,
+      comparison.baseSha
+    ).sources,
+    ['force-app/classes/Second.cls', 'force-app/classes/Third.cls']
+  );
+  assert.throws(
+    () =>
+      selectSourceRange(repo.workspace, 'full-branch', end, { endSha: end }),
+    /only a source branch/
+  );
+  assert.throws(
+    () =>
+      selectSourceRange(repo.workspace, 'commit-range', end, {
+        startSha: end,
+        endSha: start
+      }),
+    /ancestry/
+  );
+  assert.throws(
+    () =>
+      selectSourceRange(repo.workspace, 'commit-range', end, {
+        startSha: repo.base,
+        endSha: comparisonSha
+      }),
+    /ancestry/
+  );
+  assert.throws(
+    () => selectSourceRange(repo.workspace, 'branch-changes', end),
+    /comparison branch/
+  );
+});
+
+test('explicit delta includes multiple commits and requires a comparison base', (context) => {
   const repo = repository();
   context.after(() => rmSync(repo.workspace, { recursive: true, force: true }));
   const settings = releasePlan(
@@ -351,7 +409,7 @@ test('cumulative delta includes multiple commits and requires a real baseline', 
   assert.equal(payload.payloadHash.length, 64);
   assert.throws(
     () => releaseSources(repo.workspace, head, head, settings),
-    /Bootstrap/
+    /explicit comparison base/
   );
   assert.deepEqual(
     releaseSources(repo.workspace, head, head, { ...settings, mode: 'full' })
@@ -479,7 +537,12 @@ test('report parser refuses dry runs as actual deploys, wrong IDs, partial, and 
 function memoryHistory(entries: ReleaseEntry[] = []): ReleaseHistory {
   return {
     async list() {
-      return entries;
+      throw new Error('Ordinary execution must not read deployment history.');
+    },
+    async get(id) {
+      const found = entries.find((item) => item.id === id);
+      if (!found) throw new Error('Missing saved release');
+      return found;
     },
     async create(receipt) {
       const created = {
@@ -496,7 +559,7 @@ function memoryHistory(entries: ReleaseEntry[] = []): ReleaseHistory {
   };
 }
 
-test('manual validation, deploy, quick deploy, and recovery preserve baseline and never silently fall back', async (context) => {
+test('explicit releases ignore unrelated history and never silently fall back, while recovery only reports', async (context) => {
   const repo = repository();
   context.after(() => rmSync(repo.workspace, { recursive: true, force: true }));
   const entries: ReleaseEntry[] = [];
@@ -559,7 +622,7 @@ test('manual validation, deploy, quick deploy, and recovery preserve baseline an
   actual = false;
   await runRelease({ ...options, operation: 'validate' });
   assert.equal(entries[0].state, 'success');
-  assert.equal(baseline(entries, orgId), undefined);
+  assert.equal(entries[0].receipt.operation, 'validate');
   assert.ok(
     commands.some(
       (args) =>
@@ -584,16 +647,20 @@ test('manual validation, deploy, quick deploy, and recovery preserve baseline an
     commands.filter((args) => args[2] === 'start').length,
     startsBeforeQuick
   );
-  assert.equal(baseline(entries, orgId), undefined);
+  assert.equal(
+    entries.filter(
+      (item) =>
+        item.receipt.operation !== 'validate' && item.state === 'success'
+    ).length,
+    0
+  );
 
   quickRejected = false;
   actual = false;
   await runRelease({ ...options, operation: 'quick-deploy', recordId: 1 });
-  assert.equal(baseline(entries, orgId)?.id, 3);
-  await assert.rejects(
-    runRelease({ ...options, operation: 'quick-deploy', recordId: 1 }),
-    /baseline changed/
-  );
+  assert.equal(entries[2].state, 'success');
+  actual = false;
+  await runRelease({ ...options, operation: 'quick-deploy', recordId: 1 });
 
   actualInProgress = true;
   await assert.rejects(
@@ -603,10 +670,6 @@ test('manual validation, deploy, quick deploy, and recovery preserve baseline an
   const unresolved = entries.at(-1)!;
   assert.equal(unresolved.state, 'in_progress');
   assert.equal(unresolved.jobId, jobId);
-  await assert.rejects(
-    runRelease({ ...options, operation: 'deploy' }),
-    /unresolved/
-  );
   actualInProgress = false;
   const startsBeforeRecovery = commands.filter(
     (args) => args[2] === 'start'
@@ -616,37 +679,133 @@ test('manual validation, deploy, quick deploy, and recovery preserve baseline an
     operation: 'reconcile',
     recordId: unresolved.id
   });
-  assert.equal(baseline(entries, orgId)?.id, unresolved.id);
+  assert.equal(unresolved.state, 'success');
   assert.equal(
     commands.filter((args) => args[2] === 'start').length,
     startsBeforeRecovery
   );
   assert.equal(existsSync(authHome), false);
+
+  const warnings: string[] = [];
+  const noAudit: ReleaseHistory = {
+    async list() {
+      throw new Error('History is not a payload selector.');
+    },
+    async get() {
+      throw new Error('No saved job requested.');
+    },
+    async create() {
+      throw new Error('Audit unavailable.');
+    },
+    async status() {
+      throw new Error('Audit unavailable.');
+    }
+  };
+  const independent = await runRelease({
+    ...options,
+    operation: 'deploy',
+    history: noAudit,
+    onAuditWarning: (message) => warnings.push(message)
+  });
+  assert.equal(independent.outcome, 'Succeeded');
+  assert.equal(independent.entry?.id, 0);
+  assert.equal(warnings.length, 1);
+
+  const saved = entries[0];
+  saved.receipt.orgId = '00D000000000002AAA';
+  await assert.rejects(
+    runRelease({ ...options, operation: 'quick-deploy', recordId: saved.id }),
+    /identity does not match/
+  );
+  saved.receipt.orgId = orgId;
 });
 
-test('manual release workflow separates branch/environment, snapshots config, pins sources, and serializes org releases', () => {
+test('focused release actions fix source selection or operation and share one implementation', () => {
+  const root = path.resolve(__dirname, '..');
+  for (const [name, fixed] of [
+    ['validate-deploy-full-branch', "selection: 'full-branch'"],
+    ['validate-deploy-commit-range', "selection: 'commit-range'"],
+    ['validate-deploy-branch-changes', "selection: 'branch-changes'"],
+    ['quick-deploy-release', "operation: 'quick-deploy'"],
+    ['reconcile-release', "operation: 'reconcile'"],
+    ['prepare-release', 'prepare: true']
+  ]) {
+    const manifest = parse(
+      readFileSync(path.join(root, 'actions', name, 'action.yml'), 'utf8')
+    );
+    const source = readFileSync(
+      path.join(root, 'actions', name, 'src/index.ts'),
+      'utf8'
+    );
+    assert.equal(manifest.runs.using, 'node24');
+    assert.equal(manifest.runs.main, 'dist/index.js');
+    assert.ok(source.includes('../../deploy-metadata/src/action'));
+    assert.ok(source.includes(fixed));
+    assert.ok(!manifest.inputs.mode);
+    if (name.startsWith('validate-deploy')) {
+      assert.equal(manifest.inputs.operation.default, 'validate');
+      assert.ok(!manifest.inputs['to-sha']);
+    }
+  }
+});
+
+test('focused manual workflows expose only relevant inputs and share pinned environment-scoped execution', () => {
   const root = path.resolve(__dirname, '../..');
   const workflow = parse(
     readFileSync(
-      path.join(root, '.github/workflows/salesforce-release.yml'),
+      path.join(root, '.github/workflows/release-execution.yml'),
       'utf8'
     )
   );
-  assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
-  const inputs = workflow.on.workflow_dispatch.inputs;
-  assert.equal(inputs['source-branch'].type, 'string');
-  assert.equal(inputs.environment.type, 'environment');
-  assert.equal(inputs.operation.default, 'validate');
-  assert.deepEqual(inputs.operation.options, [
-    'validate',
-    'deploy',
-    'quick-deploy',
-    'reconcile'
-  ]);
+  assert.deepEqual(Object.keys(workflow.on), ['workflow_call']);
+  const specifications = [
+    [
+      'validate-deploy-full-branch',
+      ['source-branch', 'environment', 'operation']
+    ],
+    [
+      'validate-deploy-commit-range',
+      [
+        'source-branch',
+        'start-commit',
+        'end-commit',
+        'environment',
+        'operation'
+      ]
+    ],
+    [
+      'validate-deploy-branch-changes',
+      ['source-branch', 'comparison-branch', 'environment', 'operation']
+    ],
+    ['quick-deploy-release', ['environment', 'release-record-id']],
+    ['reconcile-release', ['environment', 'release-record-id']]
+  ] as const;
+  for (const [name, expected] of specifications) {
+    const entry = parse(
+      readFileSync(path.join(root, '.github/workflows', name + '.yml'), 'utf8')
+    );
+    assert.deepEqual(Object.keys(entry.on), ['workflow_dispatch']);
+    const inputs = entry.on.workflow_dispatch.inputs;
+    assert.deepEqual(Object.keys(inputs), [...expected]);
+    assert.equal(inputs.environment.type, 'environment');
+    assert.ok(!entry.name.includes('Salesforce'));
+    if (inputs.operation) {
+      assert.equal(inputs.operation.default, 'validate');
+      assert.deepEqual(inputs.operation.options, ['validate', 'deploy']);
+    }
+    assert.equal(
+      entry.jobs.release.uses,
+      './.github/workflows/release-execution.yml'
+    );
+  }
   assert.equal(workflow.jobs.prepare.permissions.deployments, 'read');
   const release = workflow.jobs.release;
-  assert.equal(release.permissions.deployments, 'write');
-  assert.equal(release.environment, '${{ inputs.environment }}');
+  assert.equal(workflow.permissions.deployments, 'write');
+  assert.equal(workflow.permissions.checks, 'write');
+  assert.deepEqual(release.environment, {
+    name: '${{ inputs.environment }}',
+    deployment: false
+  });
   assert.equal(release.concurrency['cancel-in-progress'], false);
   assert.match(release.concurrency.group, /outputs.profile\).org/);
   assert.doesNotMatch(release.concurrency.group, /source-branch|operation/);
@@ -657,25 +816,25 @@ test('manual release workflow separates branch/environment, snapshots config, pi
         step.with['fetch-depth'] === 0
     )
   );
-  const metadata = parse(
-    readFileSync(
-      path.join(root, 'github-actions/actions/deploy-metadata/action.yml'),
-      'utf8'
-    )
-  );
   for (const job of [workflow.jobs.prepare, release]) {
     for (const step of job.steps) {
-      if (step.uses === './.ci/github-actions/actions/deploy-metadata') {
+      if (step.uses?.startsWith('./.ci/github-actions/actions/')) {
+        const metadata = parse(
+          readFileSync(
+            path.join(root, step.uses.replace('./.ci/', ''), 'action.yml'),
+            'utf8'
+          )
+        );
         for (const input of Object.keys(step.with))
           assert.ok(input in metadata.inputs, `Undeclared input ${input}`);
       }
     }
   }
   const execute = release.steps.find(
-    (step: { id?: string }) => step.id === 'release'
+    (step: { id?: string }) => step.id === 'full'
   );
   assert.equal(execute.with.config, '${{ needs.prepare.outputs.config }}');
-  assert.equal(execute.with['source-branch'], '${{ inputs.source-branch }}');
+  assert.equal(execute.with.plan, '${{ needs.prepare.outputs.plan }}');
   assert.match(execute.with.username, /secrets\[fromJSON/);
   assert.ok(
     release.steps.some(
@@ -684,7 +843,6 @@ test('manual release workflow separates branch/environment, snapshots config, pi
     )
   );
   assert.match(release.steps.at(-1).if, /always\(\)/);
-  assert.equal(metadata.runs.using, 'node24');
   const tooling = parse(
     readFileSync(
       path.join(root, '.github/workflows/github-actions-ci.yml'),
@@ -693,9 +851,245 @@ test('manual release workflow separates branch/environment, snapshots config, pi
   );
   assert.ok(
     tooling.on.pull_request.paths.includes(
-      '.github/workflows/salesforce-release.yml'
+      '.github/workflows/release-execution.yml'
     )
   );
+});
+
+test('compiled focused release rejects invalid routing and reaches isolated JWT execution without a prepare-only input', (context) => {
+  const repo = repository();
+  const temporary = mkdtempSync(path.join(tmpdir(), 'compiled-release-test-'));
+  context.after(() => {
+    rmSync(repo.workspace, { recursive: true, force: true });
+    rmSync(temporary, { recursive: true, force: true });
+  });
+  const project = path.resolve(__dirname, '..');
+  const output = path.join(temporary, 'dist');
+  execFileSync(
+    process.execPath,
+    [
+      require.resolve('@vercel/ncc/dist/ncc/cli.js'),
+      'build',
+      path.join(project, 'actions/validate-deploy-full-branch/src/index.ts'),
+      '--out',
+      output
+    ],
+    { cwd: project, stdio: 'inherit' }
+  );
+  const summary = path.join(temporary, 'summary');
+  const githubOutput = path.join(temporary, 'output');
+  writeFileSync(summary, '');
+  writeFileSync(githubOutput, '');
+  const plan = {
+    branch: 'main',
+    environment: 'production',
+    operation: 'validate',
+    range: {
+      selection: 'full-branch',
+      branchSha: repo.base,
+      headSha: repo.base
+    }
+  };
+  const env = {
+    ...process.env,
+    GITHUB_REPOSITORY: 'example/salesforce',
+    GITHUB_WORKSPACE: repo.workspace,
+    GITHUB_STEP_SUMMARY: summary,
+    GITHUB_OUTPUT: githubOutput,
+    GITHUB_EVENT_NAME: 'workflow_dispatch',
+    INPUT_CONFIG: JSON.stringify(config),
+    'INPUT_ORGS-CONFIG': JSON.stringify(profiles),
+    INPUT_ENVIRONMENT: 'production',
+    INPUT_OPERATION: 'validate',
+    INPUT_PLAN: JSON.stringify(plan),
+    'INPUT_GITHUB-TOKEN': 'fake-test-token',
+    INPUT_USERNAME: '',
+    'INPUT_CLIENT-ID': '',
+    'INPUT_JWT-PRIVATE-KEY': '',
+    'INPUT_WORKING-DIRECTORY': '.',
+    'INPUT_PREPARE-ONLY': ''
+  };
+  for (const [overrides, expected] of [
+    [{ GITHUB_EVENT_NAME: 'pull_request' }, /manually dispatched/],
+    [{ INPUT_OPERATION: 'quick-deploy' }, /only validate or deploy/],
+    [
+      { INPUT_PLAN: JSON.stringify({ ...plan, operation: 'deploy' }) },
+      /prepared plan does not match/
+    ],
+    [{}, /JWT authentication requires username/]
+  ] as const) {
+    const result = spawnSync(
+      process.execPath,
+      [path.join(output, 'index.js')],
+      { cwd: repo.workspace, encoding: 'utf8', env: { ...env, ...overrides } }
+    );
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, expected);
+    assert.ok(!result.stdout.includes('Input does not meet YAML'));
+  }
+});
+
+test('compiled preparation pins all source plans and derives Quick Deploy context without credentials or live branch lookup', async (context) => {
+  const repo = repository();
+  const temporary = mkdtempSync(path.join(tmpdir(), 'compiled-prepare-test-'));
+  context.after(() => {
+    rmSync(repo.workspace, { recursive: true, force: true });
+    rmSync(temporary, { recursive: true, force: true });
+  });
+  writeFileSync(
+    path.join(repo.workspace, 'force-app/classes/Second.cls'),
+    'public class Second {}'
+  );
+  const start = repo.commit();
+  writeFileSync(
+    path.join(repo.workspace, 'force-app/classes/Third.cls'),
+    'public class Third {}'
+  );
+  const end = repo.commit();
+  const project = path.resolve(__dirname, '..');
+  const output = path.join(temporary, 'dist');
+  execFileSync(
+    process.execPath,
+    [
+      require.resolve('@vercel/ncc/dist/ncc/cli.js'),
+      'build',
+      path.join(project, 'actions/prepare-release/src/index.ts'),
+      '--out',
+      output
+    ],
+    { cwd: project, stdio: 'inherit' }
+  );
+  let branchesAllowed = true;
+  const receipt = {
+    ...entry(12, 'validate').receipt,
+    headSha: start,
+    branchSha: start,
+    selection: 'full-branch'
+  };
+  const server = createServer((request, response) => {
+    response.setHeader('content-type', 'application/json');
+    const pathname = new URL(request.url ?? '/', 'http://localhost').pathname;
+    if (pathname.endsWith('/check-runs/12')) {
+      response.end(
+        JSON.stringify({
+          id: 12,
+          name: 'Release validation',
+          head_sha: start,
+          status: 'completed',
+          conclusion: 'success',
+          external_id: `sf-job:${jobId}`,
+          output: { text: JSON.stringify(receipt) }
+        })
+      );
+      return;
+    }
+    assert.ok(
+      branchesAllowed,
+      'Utilities must derive source context from the saved validation, not live branch tips.'
+    );
+    if (pathname.endsWith('/branches/release-x'))
+      response.end(JSON.stringify({ commit: { sha: end } }));
+    else if (pathname.endsWith('/branches/main'))
+      response.end(JSON.stringify({ commit: { sha: repo.base } }));
+    else {
+      response.statusCode = 404;
+      response.end('{}');
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  context.after(
+    () =>
+      new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      )
+  );
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const policy = {
+    version: 1,
+    branches: {
+      'release-*': { deployment: { enabled: true, orgs: ['production'] } }
+    }
+  };
+  let count = 0;
+  const prepare = async (inputs: Record<string, string>) => {
+    const summary = path.join(temporary, `summary-${count}`);
+    const githubOutput = path.join(temporary, `output-${count++}`);
+    writeFileSync(summary, '');
+    writeFileSync(githubOutput, '');
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      GITHUB_API_URL: `http://127.0.0.1:${address.port}`,
+      GITHUB_REPOSITORY: 'example/salesforce',
+      GITHUB_WORKSPACE: repo.workspace,
+      GITHUB_EVENT_NAME: 'workflow_dispatch',
+      GITHUB_STEP_SUMMARY: summary,
+      GITHUB_OUTPUT: githubOutput,
+      INPUT_CONFIG: JSON.stringify(policy),
+      'INPUT_ORGS-CONFIG': JSON.stringify(profiles),
+      INPUT_ENVIRONMENT: 'production',
+      INPUT_OPERATION: 'validate',
+      INPUT_SELECTION: 'full-branch',
+      'INPUT_SOURCE-BRANCH': 'release-x',
+      'INPUT_COMPARISON-BRANCH': '',
+      'INPUT_START-COMMIT': '',
+      'INPUT_END-COMMIT': '',
+      'INPUT_RELEASE-RECORD-ID': '',
+      'INPUT_GITHUB-TOKEN': 'fake-test-token',
+      'INPUT_WORKING-DIRECTORY': '.',
+      INPUT_USERNAME: '',
+      'INPUT_CLIENT-ID': '',
+      'INPUT_JWT-PRIVATE-KEY': '',
+      ...inputs
+    };
+    const result = await new Promise<{ code: number | null; text: string }>(
+      (resolve, reject) => {
+        const child = spawn(process.execPath, [path.join(output, 'index.js')], {
+          cwd: repo.workspace,
+          env
+        });
+        let text = '';
+        child.stdout.on('data', (chunk) => (text += String(chunk)));
+        child.stderr.on('data', (chunk) => (text += String(chunk)));
+        child.once('error', reject);
+        child.once('close', (code) => resolve({ code, text }));
+      }
+    );
+    assert.equal(result.code, 0, result.text);
+    const lines = readFileSync(githubOutput, 'utf8').trimEnd().split(/\r?\n/);
+    const outputs: Record<string, string> = {};
+    for (let index = 0; index < lines.length; index += 3)
+      outputs[lines[index].split('<<')[0]] = lines[index + 1];
+    assert.deepEqual(JSON.parse(outputs.config), policy);
+    assert.deepEqual(JSON.parse(outputs['orgs-config']), profiles);
+    return JSON.parse(outputs.plan);
+  };
+  assert.equal((await prepare({})).range.headSha, end);
+  const commits = await prepare({
+    INPUT_SELECTION: 'commit-range',
+    'INPUT_START-COMMIT': start,
+    'INPUT_END-COMMIT': end
+  });
+  assert.equal(commits.range.startSha, start);
+  assert.equal(commits.range.baseSha, repo.base);
+  assert.equal(commits.range.headSha, end);
+  const branches = await prepare({
+    INPUT_SELECTION: 'branch-changes',
+    'INPUT_COMPARISON-BRANCH': 'main'
+  });
+  assert.equal(branches.range.baseSha, repo.base);
+  assert.equal(branches.range.headSha, end);
+  branchesAllowed = false;
+  const quick = await prepare({
+    INPUT_SELECTION: '',
+    INPUT_OPERATION: 'quick-deploy',
+    'INPUT_SOURCE-BRANCH': '',
+    'INPUT_RELEASE-RECORD-ID': 'validation:12'
+  });
+  assert.equal(quick.branch, 'release-x');
+  assert.equal(quick.range.headSha, start);
+  assert.equal(quick.recordKind, 'validation');
 });
 
 test('GitHub history filters task/org, paginates records and statuses, and ignores automatic environment inactivation', async () => {
@@ -779,12 +1173,12 @@ test('GitHub history filters task/org, paginates records and statuses, and ignor
     listed.map((item) => item.id),
     [1, 2]
   );
-  assert.equal(baseline(listed, orgId)?.id, 2);
+  assert.equal(listed[1].id, 2);
   assert.ok(
     listed.every((item) => item.state === 'success' && item.jobId === jobId)
   );
   assert.ok(requests.some((url) => url.includes('/statuses?page=2')));
-  const created = await history.create(entry(99, 'validate').receipt);
+  const created = await history.create(entry(99, 'deploy').receipt);
   created.jobId = jobId;
   await history.status(created, 'success');
   assert.equal(writes[0].auto_merge, false);
@@ -794,4 +1188,43 @@ test('GitHub history filters task/org, paginates records and statuses, and ignor
   assert.equal(writes[1].description, `sf-job:${jobId}`);
   conflicting = true;
   await assert.rejects(history.list(), /conflicting/);
+});
+
+test('validation records use checks, not deployment objects, and retain exact job context for utilities', async () => {
+  const { getOctokit } = await import('@actions/github');
+  const receipt = entry(1, 'validate').receipt;
+  let stored: Record<string, unknown> = {};
+  const methods: string[] = [];
+  const client = getOctokit('test-token-not-a-secret', {
+    request: {
+      fetch: async (input: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        methods.push(request.method);
+        assert.match(url.pathname, /check-runs/);
+        assert.ok(!url.pathname.includes('deployments'));
+        if (request.method !== 'GET')
+          stored = {
+            ...stored,
+            ...((await request.json()) as Record<string, unknown>)
+          };
+        return Response.json({ id: 12, ...stored, head_sha: receipt.headSha });
+      }
+    }
+  });
+  const history = githubHistory(
+    client,
+    { owner: 'example', repo: 'salesforce' },
+    'production',
+    'https://github.com/example/salesforce/actions/runs/1'
+  );
+  const created = await history.create(receipt);
+  assert.equal(created.kind, 'validation');
+  created.jobId = jobId;
+  await history.status(created, 'success');
+  const saved = await history.get(12, 'validation');
+  assert.equal(saved.jobId, jobId);
+  assert.equal(saved.state, 'success');
+  assert.deepEqual(saved.receipt, receipt);
+  assert.deepEqual(methods, ['POST', 'PATCH', 'GET']);
 });
