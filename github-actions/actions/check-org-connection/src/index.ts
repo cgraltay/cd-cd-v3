@@ -85,7 +85,7 @@ async function run(): Promise<void> {
         [display(org), display(environment), 'Connected', result.orgId]
       ])
       .addRaw(
-        'JWT authentication and a read-only API query succeeded. No metadata was changed.'
+        'JWT authentication and a read-only API request succeeded. No metadata was changed.'
       )
       .write();
     core.info(

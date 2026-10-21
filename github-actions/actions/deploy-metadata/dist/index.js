@@ -44829,7 +44829,56 @@ function releaseSources(workspace, headSha, branchSha, settings, baseSha) {
     };
 }
 
+;// CONCATENATED MODULE: ./shared/org-api.ts
+
+async function verifyOrgApi(session) {
+    const identity = await session.run([
+        'org',
+        'display',
+        '--target-org',
+        session.alias,
+        '--json'
+    ]);
+    let orgId;
+    try {
+        if (identity.exitCode !== 0)
+            throw new Error('Identity failed');
+        const report = object({
+            status: literal(0),
+            result: object({
+                id: schemas_string().regex(/^00D[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/)
+            })
+        })
+            .parse(JSON.parse(identity.stdout));
+        orgId = report.result.id;
+    }
+    catch {
+        throw new Error('The Salesforce API connection check could not verify the authenticated org ID.');
+    }
+    const response = await session.run([
+        'api',
+        'request',
+        'rest',
+        '/services/data/v66.0/',
+        '--target-org',
+        session.alias
+    ]);
+    try {
+        if (response.exitCode !== 0)
+            throw new Error('API request failed');
+        object({
+            query: literal('/services/data/v66.0/query'),
+            sobjects: literal('/services/data/v66.0/sobjects')
+        }).parse(JSON.parse(response.stdout));
+    }
+    catch {
+        throw new Error('JWT login completed, but the Salesforce API connection check failed. Check API access and org availability.');
+    }
+    return { orgId };
+}
+
 ;// CONCATENATED MODULE: ./actions/deploy-metadata/src/run.ts
+
 
 
 
@@ -44871,30 +44920,7 @@ function deploymentReport(response, jobId, checkOnly) {
 }
 async function runRelease(options) {
     return withJwtOrg(options, async ({ alias, run }) => {
-        const identityResponse = await run([
-            'data',
-            'query',
-            '--query',
-            'SELECT Id FROM Organization LIMIT 1',
-            '--target-org',
-            alias,
-            '--json'
-        ]);
-        if (identityResponse.exitCode !== 0)
-            throw new Error('Unable to verify Salesforce org identity.');
-        const identity = object({
-            status: literal(0),
-            result: object({
-                done: literal(true),
-                totalSize: literal(1),
-                records: array(object({
-                    Id: schemas_string().regex(/^00D[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/)
-                }))
-                    .length(1)
-            })
-        })
-            .parse(run_json(identityResponse));
-        const orgId = identity.result.records[0].Id;
+        const { orgId } = await verifyOrgApi({ alias, run });
         const entries = await options.history.list();
         const current = baseline(entries, orgId);
         const plan = options.plan;

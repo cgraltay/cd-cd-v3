@@ -42,18 +42,20 @@ The checking phase:
    key with at least 2048 bits.
 2. Creates a private temporary CLI home and a key file with `0600` permissions.
 3. Runs `sf org login jwt` with a unique alias without setting a default org.
-4. Runs `sf data query --query "SELECT Id FROM Organization LIMIT 1"` through
-   the authenticated alias and requires a successful complete JSON result.
-5. Exposes only connection success and the returned organization ID.
-6. Removes local key and auth state in cleanup, including on login/query errors.
+4. Reads the authenticated org ID using `sf org display --json`, without logging
+   its token-bearing response, and makes an authenticated read-only request using
+   `sf api request rest /services/data/v66.0/`. Requires the expected REST resources.
+5. Exposes only connection success and the verified authenticated org ID.
+6. Removes local key and auth state in cleanup, including on login/API errors.
 
 This tests both authentication and live API access; it does not merely read a
-cached org-display response. The integration user must be allowed to query
-Organization. It does not prove permission to deploy every metadata type or
+cached org-display response. No `Organization` SOQL access or business-object read
+permission is needed, including for minimum-access API-only integration users.
+It does not prove permission to deploy every metadata type or
 that Apex tests will pass. Compare the displayed org ID with the intended org
 when diagnosing accidental environment/credential routing errors.
 
-Raw login/query output, access tokens, username values, client IDs, and private
+Raw login/display/API output, access tokens, username values, client IDs, and private
 keys are not included in summaries or artifacts. CLI errors are sanitized.
 Inherited action inputs and GitHub/Salesforce auth variables are removed from
 the CLI environment. The shared JWT implementation is also used by deployment
