@@ -2,6 +2,9 @@
  * @description This is class A.
  */
 public with sharing class A {
+  /**
+   * @description The account queried by this class.
+   */
   public Account account { get; private set; }
 
   /**
