@@ -23,7 +23,7 @@ interface Job {
   if?: string;
   needs?: string | string[];
   permissions?: Record<string, string>;
-  environment?: string;
+  environment?: string | { name: string; deployment: boolean };
   steps: Step[];
   strategy?: { 'fail-fast': boolean; matrix: string };
 }
@@ -131,7 +131,10 @@ test('deployment validation permits a skipped analyzer only when analysis is dis
 test('parallel validation binds profile environments and passes secrets only as action inputs', () => {
   const job = workflow.jobs.validation;
   assert.equal(job.strategy?.['fail-fast'], false);
-  assert.equal(job.environment, '${{ matrix.environment }}');
+  assert.deepEqual(job.environment, {
+    name: '${{ matrix.environment }}',
+    deployment: false
+  });
   assert.ok(job.if?.includes('head.repo.full_name == github.repository'));
   assert.ok(job.if?.includes('draft == false'));
   assert.ok(job.if?.includes("needs.branch-name.result == 'success'"));

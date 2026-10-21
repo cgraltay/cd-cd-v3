@@ -44304,6 +44304,16 @@ async function upsertPullRequestComment(client, pullRequest, comment) {
         });
     }
 }
+async function replacePullRequestComment(client, pullRequest, comment) {
+    const marker = commentMarker(comment.key);
+    await deletePullRequestComment(client, pullRequest, comment);
+    await client.rest.issues.createComment({
+        owner: pullRequest.owner,
+        repo: pullRequest.repo,
+        issue_number: pullRequest.number,
+        body: `${marker}\n${comment.body}`
+    });
+}
 async function deletePullRequestComment(client, pullRequest, comment) {
     const marker = commentMarker(comment.key);
     const { owner, repo, number } = pullRequest;
@@ -44358,18 +44368,28 @@ function display(value) {
         .replaceAll('>', '&gt;')
         .replaceAll('@', '&#64;');
 }
-function section(items, format) {
+function comment_text(value) {
+    return display(String(value)
+        .slice(0, 300)
+        .replace(/[\r\n]+/g, ' ')
+        .replace(/[\\`*_[\]{}()#!|]/g, '\\$&'));
+}
+function code(value) {
+    const valueText = String(value)
+        .slice(0, 300)
+        .replace(/[\r\n]+/g, ' ');
+    const fence = '`'.repeat(Math.max(0, ...(valueText.match(/`+/g) ?? []).map((match) => match.length)) + 1);
+    return valueText.includes('`')
+        ? `${fence} ${valueText} ${fence}`
+        : `${fence}${valueText}${fence}`;
+}
+function section(items, format, empty) {
     return items.length
-        ? '<pre>' +
-            items
-                .slice(0, 10)
-                .map((item) => display(format(item).slice(0, 300)))
-                .join('\n\n') +
-            '</pre>' +
+        ? items.slice(0, 10).map(format).join('\n\n') +
             (items.length > 10
                 ? '\n\nAdditional failures are available in the result artifact.'
                 : '')
-        : 'None.';
+        : empty;
 }
 async function publishValidationComment(client, pullRequest, options) {
     const { result } = options;
@@ -44380,11 +44400,16 @@ async function publishValidationComment(client, pullRequest, options) {
     const failures = entries(tests.failures);
     const coverage = entries(tests.codeCoverageWarnings);
     const body = [
-        `## Deployment dry run ${result.outcome}`,
+        `## Deployment Dry Run ${result.outcome}`,
         '',
-        `<pre>Org: ${display(options.org.slice(0, 100))}\nEnvironment: ${display(options.environment.slice(0, 100))}\nTest level: ${display(options.testLevel)}\nSource paths: ${options.sourceCount}\nDeploy ID: ${display(result.report.result?.id ?? 'N/A')}\nCLI exit code: ${result.exitCode}</pre>`,
+        `- Org: ${code(options.org.slice(0, 100))}`,
+        `- Environment: ${code(options.environment.slice(0, 100))}`,
+        `- Test level: ${code(options.testLevel)}`,
+        `- Source paths: ${code(options.sourceCount)}`,
+        `- Deploy ID: ${code(result.report.result?.id ?? 'N/A')}`,
+        `- CLI exit code: ${code(result.exitCode)}`,
         ...(result.report.message
-            ? ['', '<pre>' + display(result.report.message.slice(0, 300)) + '</pre>']
+            ? [`- Message: ${comment_text(result.report.message)}`]
             : []),
         '',
         '### Component Failures',
@@ -44401,21 +44426,34 @@ async function publishValidationComment(client, pullRequest, options) {
             const filename = source && name.includes('/' + source + '/')
                 ? name.slice(name.indexOf('/' + source + '/') + 1)
                 : name;
-            return `${filename} (line ${failure.lineNumber ?? '?'}, column ${failure.columnNumber ?? '?'})\n${failure.componentType ?? ''} ${failure.fullName ?? ''}\n${failure.problem ?? failure.message ?? 'No details returned.'}`;
-        }),
+            const location = [
+                failure.lineNumber ? `line ${comment_text(failure.lineNumber)}` : '',
+                failure.columnNumber ? `column ${comment_text(failure.columnNumber)}` : ''
+            ]
+                .filter(Boolean)
+                .join(', ');
+            return [
+                `- ${code(filename)}${location ? ` (${location})` : ''}  `,
+                `  Component: ${code(failure.componentType ?? 'Unknown type')} ${code(failure.fullName ?? 'Unknown name')}  `,
+                `  Problem: ${comment_text(failure.problem ?? failure.message ?? 'No details returned.')}`
+            ].join('\n');
+        }, 'No component failures.'),
         '',
         '### Test Failures',
-        section(failures, (failure) => `${failure.name ?? 'Unknown test'}.${failure.methodName ?? ''}\n${failure.message ?? ''}\n${failure.stackTrace ?? ''}`),
+        section(failures, (failure) => [
+            `- ${code([failure.name, failure.methodName].filter(Boolean).join('.') || 'Unknown test')}  `,
+            `  Message: ${comment_text(failure.message ?? 'No failure detail returned.')}`
+        ].join('\n'), 'No test failures.'),
         '',
         '### Coverage Failures',
-        section(coverage, (failure) => `${failure.name ?? failure.id ?? 'Apex coverage'}: ${failure.message ?? ''}`),
+        section(coverage, (failure) => `- ${code(failure.name ?? failure.id ?? 'Apex coverage')}: ${comment_text(failure.message ?? 'No coverage detail returned.')}`, 'No coverage failures.'),
         '',
         'The workflow uploads the complete sanitized JSON result as an artifact.',
         ...(options.runUrl
             ? ['', `[Workflow run and artifacts](${options.runUrl})`]
             : [])
     ].join('\n');
-    await upsertPullRequestComment(client, pullRequest, {
+    await replacePullRequestComment(client, pullRequest, {
         key: validationCommentKey(options.org),
         body
     });

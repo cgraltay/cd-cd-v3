@@ -41,7 +41,9 @@ jobs:
     if: needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: ${{ matrix.environment }}
+    environment:
+      name: ${{ matrix.environment }}
+      deployment: false
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}

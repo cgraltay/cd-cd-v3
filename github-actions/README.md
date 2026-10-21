@@ -222,6 +222,12 @@ removes duplicate comments for that key, tolerates comments already deleted,
 and leaves human comments and other actions' keys untouched. The title checker
 uses this cleanup on success; the branch checker retains its existing behavior.
 
+Use `replacePullRequestComment(client, { owner, repo, number }, { key, body })`
+to delete matching bot comments and create a fresh comment at the end of the PR
+conversation. Validation reports use this operation; other actions retain their
+existing upsert behavior. A deletion error prevents creation, while a creation
+error after deletion cannot restore the old comment automatically.
+
 Each caller owns its message template, escapes untrusted values, and handles
 token/context lookup and API failures. The helper does not change action status
 or log errors. Its client needs permission to comment on the PR, normally

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { getOctokit } from '@actions/github';
-import { upsertPullRequestComment } from '../../../shared/pr-comment';
+import { replacePullRequestComment } from '../../../shared/pr-comment';
 import type { DryRunResult } from './validation';
 
 export function validationCommentKey(org: string): string {
@@ -31,21 +31,39 @@ function display(value: string): string {
     .replaceAll('>', '&gt;')
     .replaceAll('@', '&#64;');
 }
+function text(value: unknown): string {
+  return display(
+    String(value)
+      .slice(0, 300)
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/[\\`*_[\]{}()#!|]/g, '\\$&')
+  );
+}
+function code(value: unknown): string {
+  const valueText = String(value)
+    .slice(0, 300)
+    .replace(/[\r\n]+/g, ' ');
+  const fence = '`'.repeat(
+    Math.max(
+      0,
+      ...(valueText.match(/`+/g) ?? []).map((match) => match.length)
+    ) + 1
+  );
+  return valueText.includes('`')
+    ? `${fence} ${valueText} ${fence}`
+    : `${fence}${valueText}${fence}`;
+}
 function section(
   items: Record<string, unknown>[],
-  format: (item: Record<string, unknown>) => string
+  format: (item: Record<string, unknown>) => string,
+  empty: string
 ): string {
   return items.length
-    ? '<pre>' +
-        items
-          .slice(0, 10)
-          .map((item) => display(format(item).slice(0, 300)))
-          .join('\n\n') +
-        '</pre>' +
+    ? items.slice(0, 10).map(format).join('\n\n') +
         (items.length > 10
           ? '\n\nAdditional failures are available in the result artifact.'
           : '')
-    : 'None.';
+    : empty;
 }
 
 export async function publishValidationComment(
@@ -69,50 +87,74 @@ export async function publishValidationComment(
   const failures = entries(tests.failures);
   const coverage = entries(tests.codeCoverageWarnings);
   const body = [
-    `## Deployment dry run ${result.outcome}`,
+    `## Deployment Dry Run ${result.outcome}`,
     '',
-    `<pre>Org: ${display(options.org.slice(0, 100))}\nEnvironment: ${display(options.environment.slice(0, 100))}\nTest level: ${display(options.testLevel)}\nSource paths: ${options.sourceCount}\nDeploy ID: ${display(result.report.result?.id ?? 'N/A')}\nCLI exit code: ${result.exitCode}</pre>`,
+    `- Org: ${code(options.org.slice(0, 100))}`,
+    `- Environment: ${code(options.environment.slice(0, 100))}`,
+    `- Test level: ${code(options.testLevel)}`,
+    `- Source paths: ${code(options.sourceCount)}`,
+    `- Deploy ID: ${code(result.report.result?.id ?? 'N/A')}`,
+    `- CLI exit code: ${code(result.exitCode)}`,
     ...(result.report.message
-      ? ['', '<pre>' + display(result.report.message.slice(0, 300)) + '</pre>']
+      ? [`- Message: ${text(result.report.message)}`]
       : []),
     '',
     '### Component Failures',
-    section(components, (failure) => {
-      const file = files.find(
-        (entry) =>
-          entry.fullName === failure.fullName &&
-          (!failure.componentType ||
-            !entry.type ||
-            entry.type === failure.componentType)
-      );
-      const name = String(
-        file?.filePath ??
-          failure.fileName ??
-          failure.fullName ??
-          'Unknown component'
-      ).replaceAll('\\', '/');
-      const source = options.sources.find((directory) =>
-        name.includes(directory + '/')
-      );
-      const filename =
-        source && name.includes('/' + source + '/')
-          ? name.slice(name.indexOf('/' + source + '/') + 1)
-          : name;
-      return `${filename} (line ${failure.lineNumber ?? '?'}, column ${failure.columnNumber ?? '?'})\n${failure.componentType ?? ''} ${failure.fullName ?? ''}\n${failure.problem ?? failure.message ?? 'No details returned.'}`;
-    }),
+    section(
+      components,
+      (failure) => {
+        const file = files.find(
+          (entry) =>
+            entry.fullName === failure.fullName &&
+            (!failure.componentType ||
+              !entry.type ||
+              entry.type === failure.componentType)
+        );
+        const name = String(
+          file?.filePath ??
+            failure.fileName ??
+            failure.fullName ??
+            'Unknown component'
+        ).replaceAll('\\', '/');
+        const source = options.sources.find((directory) =>
+          name.includes(directory + '/')
+        );
+        const filename =
+          source && name.includes('/' + source + '/')
+            ? name.slice(name.indexOf('/' + source + '/') + 1)
+            : name;
+        const location = [
+          failure.lineNumber ? `line ${text(failure.lineNumber)}` : '',
+          failure.columnNumber ? `column ${text(failure.columnNumber)}` : ''
+        ]
+          .filter(Boolean)
+          .join(', ');
+        return [
+          `- ${code(filename)}${location ? ` (${location})` : ''}  `,
+          `  Component: ${code(failure.componentType ?? 'Unknown type')} ${code(failure.fullName ?? 'Unknown name')}  `,
+          `  Problem: ${text(failure.problem ?? failure.message ?? 'No details returned.')}`
+        ].join('\n');
+      },
+      'No component failures.'
+    ),
     '',
     '### Test Failures',
     section(
       failures,
       (failure) =>
-        `${failure.name ?? 'Unknown test'}.${failure.methodName ?? ''}\n${failure.message ?? ''}\n${failure.stackTrace ?? ''}`
+        [
+          `- ${code([failure.name, failure.methodName].filter(Boolean).join('.') || 'Unknown test')}  `,
+          `  Message: ${text(failure.message ?? 'No failure detail returned.')}`
+        ].join('\n'),
+      'No test failures.'
     ),
     '',
     '### Coverage Failures',
     section(
       coverage,
       (failure) =>
-        `${failure.name ?? failure.id ?? 'Apex coverage'}: ${failure.message ?? ''}`
+        `- ${code(failure.name ?? failure.id ?? 'Apex coverage')}: ${text(failure.message ?? 'No coverage detail returned.')}`,
+      'No coverage failures.'
     ),
     '',
     'The workflow uploads the complete sanitized JSON result as an artifact.',
@@ -120,7 +162,7 @@ export async function publishValidationComment(
       ? ['', `[Workflow run and artifacts](${options.runUrl})`]
       : [])
   ].join('\n');
-  await upsertPullRequestComment(client, pullRequest, {
+  await replacePullRequestComment(client, pullRequest, {
     key: validationCommentKey(options.org),
     body
   });
