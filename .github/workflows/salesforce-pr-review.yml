@@ -167,7 +167,7 @@ jobs:
           retention-days: 10
 
   validation:
-    name: Validate ${{ matrix.org }} (${{ matrix.mode }})
+    name: Validate deployment on ${{ matrix.org }} (${{ matrix.mode }})
     needs: [configuration, branch-name, title, code-analyzer]
     if: >-
       !cancelled() && github.event_name == 'pull_request' && github.event.action != 'closed' &&
